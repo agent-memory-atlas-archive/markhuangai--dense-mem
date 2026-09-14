@@ -246,9 +246,9 @@ func AssessSynchronousRemember(
 		}
 		observability.RecordAssessorCall(deps.Metrics, request.InputTokens, 0, time.Since(started).Seconds(), outcome)
 		var mapped error
-		if errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
 			mapped = fmt.Errorf("%w: assessor phase exceeded 160 seconds", ErrRememberRequestTimeout)
-		} else if errors.Is(err, context.Canceled) {
+		} else if errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled) {
 			mapped = context.Canceled
 		} else {
 			var malformed *assessor.MalformedResponseError
@@ -257,11 +257,12 @@ func AssessSynchronousRemember(
 			} else if errors.Is(err, ErrRememberInputBudgetExceeded) {
 				mapped = fmt.Errorf("%w: refreshed assessor input exceeded the deterministic budget: %w", ErrRememberInputBudgetExceeded, err)
 			} else if errors.Is(err, assessor.ErrVerifierMalformedResponse) {
-				mapped = fmt.Errorf("%w: complete assessor response remained invalid", ErrRememberProviderResponseInvalid)
+				mapped = fmt.Errorf("%w: %w", ErrRememberProviderResponseInvalid, err)
 			} else {
 				mapped = fmt.Errorf("%w: assessor provider request failed", ErrRememberProviderUnavailable)
 			}
 		}
+		mapped = preserveSubmissionAssessmentValidationHistory(mapped, err)
 		if providerTurns > 0 {
 			mapped = &submissionAssessmentConsumedTurnsError{cause: mapped, providerTurns: providerTurns}
 		}

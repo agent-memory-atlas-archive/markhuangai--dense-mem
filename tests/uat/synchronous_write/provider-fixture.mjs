@@ -147,7 +147,33 @@ function fixtureChatResponse(payload, requestFault = "none", attempt = 1) {
   if (schemaName === "community_summary") return fixtureCommunitySummary(payload);
   if (schemaName === "dense_mem_dream_generation_response") return fixtureDreamGeneration(payload);
   if (schemaName === "dense_mem_evidence_discovery_response") return fixtureEvidenceDiscovery(payload);
-  return fixtureAssessment(assessmentInput(payload), requestFault, attempt);
+  const assessment = fixtureAssessment(assessmentInput(payload), requestFault, attempt);
+  if (requestFault === "assessment-predicate-repair") {
+    const repair = structuredInput(payload, (input) => Array.isArray(input.validation_errors));
+    const actionable = (repair.validation_errors || []).some((error) => error.field?.endsWith(".predicate_range") && error.message?.includes("256"));
+    if (actionable) {
+      const evidence = assessmentInput(payload).evidence[0];
+      const phrase = "stores durable memory in";
+      const phraseIndex = evidence.content.indexOf(phrase);
+      if (phraseIndex < 0) throw new Error("predicate-repair fixture is missing its predicate phrase");
+      const start = [...evidence.content.slice(0, phraseIndex)].length;
+      const refs = [...evidence.boundary_text.matchAll(/⟦([^⟧]+)⟧/g)].map((match) => match[1]);
+      assessment.relationship_results[0].splits[0].predicate_range = {
+        evidence_id: evidence.evidence_id,
+        start_ref: refs[start],
+        end_ref: refs[start + [...phrase].length],
+      };
+    }
+    return assessment;
+  }
+  if (requestFault !== "assessment-invalid") return assessment;
+  const [firstRelationship, ...remainingRelationships] = assessment.relationship_results || [];
+  return {
+    ...assessment,
+    relationship_results: firstRelationship
+      ? [{ ...firstRelationship, ref: "provider-forged-ref" }, ...remainingRelationships]
+      : [{ ref: "provider-forged-ref", disposition: "stored", reason: null, splits: [] }],
+  };
 }
 
 function fixtureCommunitySummary(payload) {

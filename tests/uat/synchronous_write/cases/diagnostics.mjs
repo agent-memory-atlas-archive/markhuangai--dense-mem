@@ -23,11 +23,13 @@ export async function run({ rpc, rawRPC = rpc, expect }) {
 
   const diagnosticFaults = [
     ["repair", "[fixture-fault:repair]", "completed", ""],
+    ["predicate-repair", "[fixture-fault:assessment-predicate-repair]", "completed", ""],
     ["repair-exhausted", "[fixture-fault:repair-exhausted]", "failed", "provider_response_invalid"],
     ["provider-status", "[fixture-fault:unavailable]", "failed", "provider_unavailable"],
     ["provider-429", "[fixture-fault:status-429]", "failed", "provider_unavailable"],
     ["provider-500", "[fixture-fault:status-500]", "failed", "provider_unavailable"],
     ["malformed", "[fixture-fault:malformed]", "failed", "provider_response_invalid"],
+    ["assessment-invalid", "[fixture-fault:assessment-invalid]", "failed", "provider_response_invalid"],
     ["embedding", "[fixture-fault:embedding-count]", "failed", "embedding_response_invalid"],
     ["timeout", "[fixture-fault:timeout]", "failed", "provider_unavailable"],
   ];
@@ -64,6 +66,49 @@ export async function run({ rpc, rawRPC = rpc, expect }) {
   const teamID = requiredEnv("DENSE_MEM_E2E_TEAM_ID");
   const controlURL = requiredEnv("DENSE_MEM_CONTROL_URL").replace(/\/$/, "");
   const token = requiredEnv("DENSE_MEM_CONTROL_TOKEN");
+  const assessmentDisconnect = rememberArguments("assessment-disconnect", "[fixture-fault:assessment-timeout]");
+  const assessmentController = new AbortController();
+  const assessmentCall = fetch(`${requiredEnv("DENSE_MEM_USER_URL").replace(/\/$/, "")}/mcp`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${requiredEnv("DENSE_MEM_E2E_API_KEY")}`,
+      Accept: "application/json, text/event-stream",
+      "Content-Type": "application/json",
+      "Mcp-Protocol-Version": "2026-07-28",
+      "Mcp-Method": "tools/call",
+      "Mcp-Name": "remember",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: {
+      name: "remember",
+      arguments: assessmentDisconnect.payload,
+      _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} },
+    } }),
+    signal: assessmentController.signal,
+  }).then(async (response) => {
+    const body = await response.text();
+    expect(response.ok, `assessment disconnect fixture returned HTTP ${response.status}`);
+    return body;
+  });
+  const assessmentAbort = setTimeout(() => assessmentController.abort(), 1_000);
+  try {
+    await assert.rejects(assessmentCall, { name: "AbortError" });
+  } finally {
+    clearTimeout(assessmentAbort);
+  }
+  let assessmentFailure = "";
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    assessmentFailure = postgresQuery(`
+      SELECT error_code || '|' || failed_phase || '|' || document_count || '|' || outcome
+      FROM remember_attempts
+      WHERE team_id = '${sqlLiteral(teamID)}'::uuid
+        AND idempotency_key = '${sqlLiteral(assessmentDisconnect.idempotencyKey)}'
+      ORDER BY created_at DESC, attempt_id DESC LIMIT 1;
+    `);
+    if (assessmentFailure) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  expect(assessmentFailure === "request_cancelled|assessment|0|failed", `assessment disconnect must retain cancellation without a semantic commit: ${assessmentFailure}`);
+
   for (const path of [
     "/control/api/remember-attempts?limit=101",
     "/control/api/remember-attempts?limit=0",
@@ -128,6 +173,23 @@ export async function run({ rpc, rawRPC = rpc, expect }) {
     expect(diagnostics.caller_response?.response_body?.includes('"isError":true'), `${label} detail must expose the caller response envelope`);
   }
 
+  const validationAttempt = await controlJSON(controlURL, token, `/control/api/teams/${teamID}/remember-attempts/${diagnosticAttemptIDs["assessment-invalid"]}`);
+  const validationEvent = (validationAttempt.data?.events || []).find((event) => event.metadata?.assessor_validation);
+  const validation = validationEvent?.metadata?.assessor_validation;
+  expect(validation && Array.isArray(validation.turns), "semantic assessor failure must retain bounded validation turns");
+  expect(validation.failure_class === "malformed_exhausted", `semantic assessor failure must retain its exhausted classification: ${JSON.stringify(validation)}`);
+  expect(validation.turns.length === 3, `semantic assessor failure must retain all three turns: ${JSON.stringify(validation)}`);
+  expect(validation.turns.every((turn) => Array.isArray(turn.fields) && Array.isArray(turn.field_families) && typeof turn.error_count === "number" && typeof turn.truncated === "boolean"), "validation turns must expose normalized fields, families, counts, and truncation");
+  expect(validation.turns.some((turn) => turn.error_count > 0 && turn.fields.length > 0 && turn.field_families.length > 0), "semantic assessor failure must retain rejected validation fields and families");
+  expect(!JSON.stringify(validation).includes("provider_secret") && !JSON.stringify(validation).includes("Diagnostics provider failure"), "validation metadata must exclude provider content");
+
+  stopDisabledTelemetryPrometheus();
+  const usage = await controlJSON(controlURL, token, "/control/api/metrics?window_minutes=60");
+  const totals = usage.data?.system || {};
+  expect(typeof totals.requests === "number" && typeof totals.errors === "number", "usage rollup must retain HTTP request totals");
+  expect(typeof totals.mcp_tool_calls === "number" && totals.mcp_tool_calls > 0, "usage rollup must expose dispatched MCP calls");
+  expect(typeof totals.mcp_tool_failures === "number" && totals.mcp_tool_failures > 0, "usage rollup must expose MCP failures separately");
+
   const repairRows = postgresQuery(`
     SELECT assessor_turns
     FROM remember_attempts
@@ -136,6 +198,13 @@ export async function run({ rpc, rawRPC = rpc, expect }) {
     ORDER BY created_at DESC, attempt_id DESC LIMIT 1;
   `);
   expect(repairRows === "2", `successful repair must retain two assessor turns: ${repairRows}`);
+  const predicateRepairRows = postgresQuery(`
+    SELECT assessor_turns FROM remember_attempts
+    WHERE team_id = '${sqlLiteral(teamID)}'::uuid
+      AND idempotency_key = '${sqlLiteral(idempotencyKeys["predicate-repair"])}'
+    ORDER BY created_at DESC, attempt_id DESC LIMIT 1;
+  `);
+  expect(predicateRepairRows === "2", `predicate-range feedback must repair the complete response in two turns: ${predicateRepairRows}`);
 
   const failed = attempts.failed;
   const failedList = await controlJSON(controlURL, token, `/control/api/remember-attempts?team_id=${encodeURIComponent(teamID)}&outcome=failed&limit=100`);
@@ -188,18 +257,30 @@ export async function run({ rpc, rawRPC = rpc, expect }) {
   expect(!serverLogs.includes("Diagnostics provider failure") && !serverLogs.includes("diagnostics-persisted-secret") && !serverLogs.includes("dense-mem-e2e-verifier-key"), "diagnostics content and credentials must not reach server logs");
   const fixtureFile = process.env.DENSE_MEM_E2E_DIAGNOSTICS_FIXTURE_FILE;
   if (fixtureFile) {
-    await writeFile(fixtureFile, JSON.stringify({ failed_attempt_id: item.attempt_id, diagnostic_id: failedDiagnostics.original_request?.diagnostic_id || "" }), "utf8");
+    await writeFile(fixtureFile, JSON.stringify({
+      failed_attempt_id: item.attempt_id,
+      diagnostic_id: failedDiagnostics.original_request?.diagnostic_id || "",
+      validation_attempt_id: diagnosticAttemptIDs["assessment-invalid"],
+    }), "utf8");
   }
-  return { mode: name, outcomes: Object.fromEntries(Object.entries(attempts).map(([label, result]) => [label, result?.processing_state])), attempt_id: item.attempt_id, diagnostic_id: failedDiagnostics.original_request?.diagnostic_id || "" };
+  return {
+    mode: name,
+    outcomes: Object.fromEntries(Object.entries(attempts).map(([label, result]) => [label, result?.processing_state])),
+    attempt_id: item.attempt_id,
+    diagnostic_id: failedDiagnostics.original_request?.diagnostic_id || "",
+    validation_attempt_id: diagnosticAttemptIDs["assessment-invalid"],
+    assessment_disconnect: "request_cancelled",
+  };
 }
 
 function rememberArguments(label, marker) {
   const suffix = `${Date.now()}-${randomUUID()}`;
   const idempotencyKey = `synchronous-write-diagnostics-${label}-${suffix}`;
+  const predicateContext = label === "predicate-repair" ? " This public fixture has additional background context.".repeat(6) : "";
   return {
     idempotencyKey,
     payload: {
-    evidence: [{ content: `Dense-Mem stores durable memory in PostgreSQL. [fixture:diagnostics-${label}] ${suffix} ${marker}`, source_type: "manual" }],
+    evidence: [{ content: `Dense-Mem stores durable memory in PostgreSQL. [fixture:diagnostics-${label}] ${suffix} ${marker}${predicateContext}`, source_type: "manual" }],
     relationships: [{
       ref: "durable-store",
       subject: { name: "Dense-Mem", entity_kind: "project" },
@@ -244,6 +325,14 @@ function composeServerLogs() {
   const result = spawnSync("docker", ["compose", "-p", composeProject, "-f", composeFile, "logs", "--no-color", "server"], { cwd: process.cwd(), encoding: "utf8" });
   if (result.status !== 0) throw new Error("diagnostics server log collection failed");
   return `${result.stdout}\n${result.stderr}`;
+}
+
+function stopDisabledTelemetryPrometheus() {
+  if (process.env.DENSE_MEM_E2E_TELEMETRY_DISABLED !== "1") return;
+  const composeProject = requiredEnv("DENSE_MEM_E2E_COMPOSE_PROJECT");
+  const composeFile = requiredEnv("DENSE_MEM_E2E_COMPOSE_FILE");
+  const result = spawnSync("docker", ["compose", "-p", composeProject, "-f", composeFile, "stop", "prometheus"], { cwd: process.cwd(), encoding: "utf8" });
+  if (result.status !== 0) throw new Error("telemetry-disabled harness could not stop its disposable Prometheus service");
 }
 
 function sqlLiteral(value) {
