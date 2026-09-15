@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	accessservice "github.com/markhuangai/dense-mem/internal/service/access"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,7 +16,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/markhuangai/dense-mem/internal/domain"
-	"github.com/markhuangai/dense-mem/internal/service"
 )
 
 func TestLoadHarnessConfigIsBoundedAndStrict(t *testing.T) {
@@ -61,6 +61,19 @@ func TestParseHarnessOptionsReportsMissingFlagsDeterministically(t *testing.T) {
 			_, err := parseHarnessOptions(test.args, io.Discard)
 			require.EqualError(t, err, test.want)
 		})
+	}
+}
+
+func TestHarnessRunRejectsInvalidInputsBeforeStartingTLS(t *testing.T) {
+	baseArgs := []string{"--public-base-url=https://harness.example", "--config=missing.json", "--tls-cert=missing.crt", "--tls-key=missing.key"}
+	if err := run(context.Background(), append([]string{"unexpected"}, baseArgs...), io.Discard); err == nil || !strings.Contains(err.Error(), "unexpected positional") {
+		t.Fatalf("unexpected positional error = %v", err)
+	}
+	if err := run(context.Background(), append([]string{"--public-base-url=http://harness.example"}, baseArgs[1:]...), io.Discard); err == nil || !strings.Contains(err.Error(), "invalid --public-base-url") {
+		t.Fatalf("invalid URL error = %v", err)
+	}
+	if err := run(context.Background(), baseArgs, io.Discard); err == nil || !strings.Contains(err.Error(), "load OAuth compatibility config") {
+		t.Fatalf("missing config error = %v", err)
 	}
 }
 
@@ -140,9 +153,9 @@ func TestHarnessMapsTypedValidationErrorsWithoutReflectingTokens(t *testing.T) {
 		status int
 		code   string
 	}{
-		"invalid":     {err: service.OAuthTokenInvalidError{}, status: http.StatusUnauthorized, code: "invalid_token"},
-		"expired":     {err: service.OAuthTokenExpiredError{}, status: http.StatusUnauthorized, code: "invalid_token"},
-		"unavailable": {err: service.OAuthProviderUnavailableError{}, status: http.StatusServiceUnavailable, code: "temporarily_unavailable"},
+		"invalid":     {err: accessservice.OAuthTokenInvalidError{}, status: http.StatusUnauthorized, code: "invalid_token"},
+		"expired":     {err: accessservice.OAuthTokenExpiredError{}, status: http.StatusUnauthorized, code: "invalid_token"},
+		"unavailable": {err: accessservice.OAuthProviderUnavailableError{}, status: http.StatusServiceUnavailable, code: "temporarily_unavailable"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			handler, err := newHarnessHandler("https://harness.example", profiles, harnessValidatorStub{err: test.err})
