@@ -103,6 +103,16 @@ func TestCredentialProtectorUsesLongestOverlappingVariant(t *testing.T) {
 	require.Equal(t, "[REDACTED] [REDACTED]", got.Value)
 }
 
+func TestCredentialProtectorMatchesMixedCasePercentEscapes(t *testing.T) {
+	got := NewCredentialProtector("/:").Snapshot("postgres://u:%2f%3A@host/db", 256)
+	require.Empty(t, got.UnavailableReason)
+	require.Equal(t, "postgres://u:"+CredentialProtectionRedacted+"@host/db", got.Value)
+
+	literal := NewCredentialProtector("foo%2F").Snapshot("foo%2f", 64)
+	require.Empty(t, literal.UnavailableReason)
+	require.Equal(t, "foo%2f", literal.Value)
+}
+
 func TestCredentialProtectorRejectsUnsafeValuesWithoutRawFallback(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -159,6 +169,50 @@ func TestCredentialProtectorRejectsExcessiveDepth(t *testing.T) {
 	require.Nil(t, got.Value)
 }
 
+func TestCredentialProtectorBoundsTraversalBeforeLargeCopies(t *testing.T) {
+	largeBytes := make([]byte, 1<<20)
+	got := NewCredentialProtector("secret").Snapshot(largeBytes, 128)
+	require.Equal(t, CredentialProtectionBudgetExceeded, got.UnavailableReason)
+	require.Nil(t, got.Value)
+
+	largeSlice := make([]any, 1<<20)
+	got = NewCredentialProtector("secret").Snapshot(largeSlice, 32)
+	require.Equal(t, CredentialProtectionBudgetExceeded, got.UnavailableReason)
+	require.Nil(t, got.Value)
+}
+
+func TestCredentialProtectorSnapshotsPointersAndArrays(t *testing.T) {
+	pointed := "contains secret"
+	value := [2]any{&pointed, [2]string{"safe", "secret"}}
+
+	got := NewCredentialProtector("secret").Snapshot(value, 256)
+	require.Empty(t, got.UnavailableReason)
+	require.Equal(t, []any{"contains [REDACTED]", []any{"safe", "[REDACTED]"}}, got.Value)
+
+	var nilValue any
+	got = NewCredentialProtector("secret").Snapshot(nilValue, 4)
+	require.Empty(t, got.UnavailableReason)
+	require.Nil(t, got.Value)
+}
+
+func TestCredentialProtectorSnapshotsScalarAndNilValues(t *testing.T) {
+	value := map[string]any{
+		"bool":    true,
+		"int":     int64(-3),
+		"uint":    uint64(4),
+		"float":   1.5,
+		"number":  json.Number("9007199254740993"),
+		"nil_map": map[string]string(nil),
+		"nil_ptr": (*string)(nil),
+	}
+
+	got := NewCredentialProtector("secret").Snapshot(value, 512)
+	require.Empty(t, got.UnavailableReason)
+	encoded, err := json.Marshal(got.Value)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"bool":true,"float":1.5,"int":-3,"nil_map":null,"nil_ptr":null,"number":9007199254740993,"uint":4}`, string(encoded))
+}
+
 func TestCredentialProtectorDetachedAuthenticationSecretsAndUnicodeByteBudget(t *testing.T) {
 	protector := NewCredentialProtector("configured")
 	value := map[string]any{"message": "configured auth-only"}
@@ -184,6 +238,15 @@ func TestCredentialProtectorDetachedAuthenticationSecretsAndUnicodeByteBudget(t 
 
 	if reflect.DeepEqual(got.Value, value) {
 		t.Fatal("snapshot unexpectedly retained the caller map")
+	}
+}
+
+func TestCredentialProtectorBudgetMatchesJSONEncoding(t *testing.T) {
+	for _, text := range []string{"<>&", "\b\t\n\f\r", "line\u2028separator"} {
+		encoded, err := json.Marshal(text)
+		require.NoError(t, err)
+		require.Empty(t, NewCredentialProtector("secret").Snapshot(text, len(encoded)).UnavailableReason)
+		require.Equal(t, CredentialProtectionBudgetExceeded, NewCredentialProtector("secret").Snapshot(text, len(encoded)-1).UnavailableReason)
 	}
 }
 
