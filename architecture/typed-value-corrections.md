@@ -7,9 +7,9 @@ It does not change a runtime contract, schema, migration, or accepted ADR.
 ## Report provenance
 
 - Audit source: freshly fetched `origin/main` at
-  `9ac4ac88070f325c8fc8e61d5ba756e8c321b185`.
+  `23dd4fb9619d499dc8a8f0070f2d8d31e9bd9728`.
 - Report branch and HEAD at inspection: `docs/429-typed-value-corrections` at
-  `05c44a262502880fca4e7ff5d00ce77b8ad2a006`.
+  `1332c63b5bd924ac8b609726f36f55b376401ed0`.
 - Execution checkout: `/tmp/dense-mem-429-typed-value-design`.
 - Before the report was written, the source checkout and task checkout were
   clean, protected Git configuration was recorded without exposing values, and
@@ -23,9 +23,14 @@ It does not change a runtime contract, schema, migration, or accepted ADR.
 
 Use the workflow that matches what was wrong in the original observation:
 
-1. For a mis-extracted Entity or predicate, use `correct_relationship` when
-   its complete effective support set fits the input's 1–200 unique evidence
-   spans. Supply the original Relationship version and the entire set; the
+1. For a mis-extracted Entity or predicate, use `correct_relationship` only
+   when the complete current effective support set is already known and fits
+   the input's 1–200 unique `(evidence_id, start, end)` tuples. Distinct
+   occurrences sharing one tuple cannot be represented by this input.
+   Public trace/export reads stop at
+   100 support rows without pagination, so clients without a retained complete
+   set cannot reconstruct a 101–200-support request through those readers.
+   Supply the original Relationship version and the entire set; the
    tool atomically supersedes the caller-owned Relationship and records the
    successor's provenance. Relationships with more than 200 effective supports
    have no complete public correction workflow; a truncated set is rejected.
@@ -158,6 +163,31 @@ one Relationship: insertion and counting impose no aggregate cap
 `804-844`). Sending all of them exceeds the input bound; truncating the list
 fails exact-set comparison (`internal/knowledge/postgres/relationship_correction_repository.go:626-635`).
 This is an additional current workflow limit for Entity/predicate corrections.
+
+Support identity has another limit even below those counts. Durable support
+identity includes `occurrence_id`, and the correction loader retains every
+effective support (`migrations/postgres/v2_6/20260903010001_evidence_occurrence_duplicates.sql:711-717`
+and `internal/knowledge/postgres/relationship_correction_helpers.go:128-197`).
+The public support shape contains only `evidence_id`, `start`, and `end`
+(`internal/knowledge/contract/semantic.go:345-349`). If two effective supports
+share that tuple but differ in occurrence, sending one entry fails exact-set
+matching and sending both fails duplicate-span validation
+(`internal/knowledge/postgres/relationship_correction_repository.go:523-535`
+and `626-635`). This supported state has no complete public correction path,
+even when the caller knows both occurrences and the trace is complete.
+
+Obtaining the complete set has a separate read limit. `trace_memory` leaves
+`MaxEvents` unset, which the PostgreSQL adapter defaults to 100, and
+`export_memory_pack` sets it to 100 explicitly (`internal/trace/service.go:70-82`,
+`internal/trace/postgres/semantic_trace_repository.go:23-24` and `162-169`, and
+`internal/memorypack/memory_pack.go:18-20` and `80-86`). Support reads have no
+pagination (`internal/trace/postgres/semantic_trace_repository.go:369-400`).
+The limit includes historical support rows, so it can hide part of even a
+smaller effective set. A 101–200-entry correction remains admissible if the
+caller retained the complete current set, but these readers cannot reconstruct
+it from scratch. Do not guess missing spans or submit a truncated read as the
+complete set. The public request exposes no event-limit or pagination parameter.
+
 Entity resolution can return bounded candidates and require one owner
 confirmation round (`internal/knowledge/postgres/relationship_correction_repository.go:260-270`).
 
@@ -186,7 +216,7 @@ retraction, but not the repository's internal `RetractRelationship` method
 
 | Situation | Current `remember` behavior | Current `correct_relationship` behavior | Supported recommendation now | Proposed bounded extension (future scope only) |
 | --- | --- | --- | --- | --- |
-| Entity or predicate was extracted incorrectly from the cited evidence | For predicates allowing multiple active Relationships, can store a new assessed Relationship and optionally attach `correction_target`; the target remains in its prior lifecycle state. For `current_cardinality = one`, a matching active sibling follows the stale-version rollback described below, while a semantically related target outside that selector can receive only a lineage link and remain active. | Can replace the caller-owned Relationship, preserve exact effective supports, and atomically supersede the source when the complete set fits the 200-entry input bound. | Use `correct_relationship` with the current source version and complete support set within that bound; larger sets have no complete public workflow. | Keep the existing Entity/predicate correction path; no typed-value extension is needed. |
+| Entity or predicate was extracted incorrectly from the cited evidence | For predicates allowing multiple active Relationships, can store a new assessed Relationship and optionally attach `correction_target`; the target remains in its prior lifecycle state. For `current_cardinality = one`, a matching active sibling follows the stale-version rollback described below, while a semantically related target outside that selector can receive only a lineage link and remain active. | Can replace the caller-owned Relationship, preserve exact effective supports, and atomically supersede the source when the complete set fits the 200-entry input bound and each support has a distinct public tuple. | Use `correct_relationship` with the current source version only when the complete current support set is known and representable. Public reads stop at 100 rows; larger input capacity does not guarantee a complete read-to-correction workflow. | Keep the existing Entity/predicate correction path; no typed-value extension is needed. |
 | Typed Value was extracted incorrectly for a `current_cardinality = one` predicate whose target is a matching active sibling | Applying the new active Relationship supersedes the target and increments its version before `correction_target` checks the supplied version; the check returns `ErrCorrectionTargetStale`, so the whole Remember transaction rolls back and no correction link commits. | Cannot patch the object Value or unit; a Value object cannot become an Entity. | No complete public atomic correction exists. Treat the stale result as a rolled-back attempt; do not present `correction_target` as replacement. | Add a typed-Value patch that resolves or creates the canonical Value, reuses exact supports, and supersedes the source atomically. |
 | Typed Value was extracted incorrectly for a `current_cardinality = one` predicate whose target is semantically related but not a matching active sibling | The target is not selected for one-cardinality supersession, so its expected version remains current and `correction_target` can commit only a `corrects` lineage link; the old Relationship remains active. | Cannot patch the object Value or unit; a Value object cannot become an Entity. | No complete public atomic correction exists. Do not present the lineage link as replacement; track a bounded follow-up. | Add a typed-Value patch that resolves or creates the canonical Value, reuses exact supports, and supersedes the source atomically. |
 | Numeric Value or unit was extracted incorrectly for a predicate allowing multiple active Relationships | Accepts a typed Value and can attach a correction cross-reference, but does not supersede the old Relationship. | Cannot patch the object Value or unit; a Value object cannot become an Entity. | No complete public atomic correction exists. Do not present `correction_target` as replacement; track a bounded follow-up. | Add a typed-Value patch that resolves or creates the canonical Value, reuses exact supports, and supersedes the source atomically. |
@@ -196,7 +226,8 @@ retraction, but not the repository's internal `RetractRelationship` method
 | The real-world fact changed after the original evidence | A new Remember submission can carry fresh evidence and a new validity window. Known evidence may supplement, but accepted Relationships retain submitted support. | Reuses the existing effective support set and is therefore not a fresh-fact intake path. | Use `remember` with independent fresh evidence and no correction target. | Preserve this routing and reject typed-Value correction requests that are actually new facts. |
 | Same-team owner corrects a Relationship | Authentication fixes the owner; request fields cannot override it. | Source mutation requires the caller to own the source; same-team visibility is not mutation authority. | Reject wrong-owner attempts with the existing bounded error. | Reuse the same authenticated owner check for Value patches and every created or reused Value. |
 | Source version is stale | `correction_target.expected_version` is checked during the semantic commit; a mismatch rejects the Remember transaction. | Submit and confirm fence the source version; pending confirmation becomes a bounded changed-state rejection. | Refresh and retry with a new key when an independent version change caused staleness. Matching-sibling correction-target rollback leaves the target unchanged, so do not repeat that request: use eligible Entity/predicate correction or the documented no-current-workflow outcome for typed Values. | Require the source expected version for Value patches and return the existing typed stale result without partial state. |
-| Support is missing, altered, or from the wrong space | Accepted Relationships require support; known evidence is bounded and must not replace submitted support. | Support spans must exactly match effective supports, contain at most 200 entries, and remain in the Relationship's memory space; truncation is rejected. | Preserve exact evidence IDs, occurrences, spans, source revisions, and space ownership. | Reuse exact effective support only for a proven mis-extraction; keep support and space checks identical. |
+| Support is missing, altered, or from the wrong space | Accepted Relationships require support; known evidence is bounded and must not replace submitted support. | Support spans must exactly match effective supports, contain at most 200 entries, and remain in the Relationship's memory space; truncation is rejected. | Preserve exact evidence IDs, occurrences, spans, source revisions, and space ownership. Trace/export reads return at most 100 support rows without pagination; do not infer the complete effective set from a truncated result. | Reuse exact effective support only for a proven mis-extraction; keep support and space checks identical. |
+| Two effective supports share an evidence ID and span but differ in occurrence ID | Can preserve both occurrence-specific supports on one Relationship. | The input cannot distinguish them: one tuple fails full-set matching and two identical tuples fail validation. | No complete public correction path exists for this state; do not collapse distinct occurrence provenance. | Decide how correction identifies and preserves each occurrence, then prove the colliding-tuple case with real PostgreSQL and production-entry tests. |
 | Validity needs correction | Remember can propose ordered `valid_from`/`valid_to` values as part of a new observation. | Correction copies the source validity window; no validity patch is exposed. | A changed validity assertion is fresh evidence; a future correction extension must specify its evidence rule. | Either require evidence that contains the corrected window or route the request to fresh Remember; never infer the window. |
 | Retry or replay | Whole-request hash and durable attempt state replay the authoritative result or return an idempotency conflict. | Correction hash and durable submission replay the authoritative receipt or reject a changed request under the same key. | Keep retry keys scoped to the authenticated team/profile and include every correction field in the hash. | Include the complete typed-Value patch, support set, validity, and reason in the existing correction hash. |
 | Provenance and atomicity | Evidence, observation, verification, support, search state, and optional cross-reference commit together. | Original/successor states, copied supports, cross-reference, correction event, search state, and receipt commit together. | Never claim a successful lineage link is an atomic replacement. | Keep provider work outside the transaction and atomically commit Value resolution, source supersession, successor, lineage, history, and search state. |
@@ -206,7 +237,7 @@ The trade-offs are explicit:
 | Decision dimension | Retain and document Remember | Bounded `correct_relationship` extension (future) |
 | --- | --- | --- |
 | Compatibility | Zero runtime or wire changes, but the typed-Value replacement gap remains visible to clients. | Add an optional typed-Value patch while retaining existing Entity/predicate inputs and outputs. |
-| Client effort | Existing Remember callers can submit evidence, but cannot obtain one atomic replacement for a typed Value. | Clients must read the source version and exact supports, then submit the typed patch; this matches the existing correction discipline. |
+| Client effort | Existing Remember callers can submit evidence, but cannot obtain one atomic replacement for a typed Value. | Clients need the source version and complete effective supports before submitting the typed patch. The current 100-row trace/export limit constrains that workflow and must be accounted for in a separately approved extension. |
 | Policy ownership | Remember assessment and semantic commit remain the owners; `correction_target` stays a lineage operation. | Lifecycle correction remains the single owner of replacement and reuses the existing version, support, ownership, and search fences. |
 | Implementation and test cost | Documentation only; no new persistence, provider, migration, or E2E work. | Requires Value resolution, request hashing, provider/search fencing, rollback proof, and real PostgreSQL plus production-entry positive/adverse tests. |
 
@@ -253,12 +284,16 @@ existing lifecycle owner and correction transaction:
 - Preserve occurrence IDs, source IDs and revisions, quotes, authority,
   support decisions, and correction event metadata. A changed fact must not be
   admitted through this support-reuse path merely because its Value has the
-  same type or unit.
+  same type or unit. Decide whether correction input carries occurrence identity
+  or uses another deterministic preservation mechanism when distinct supports
+  share a public evidence/span tuple.
 - Add real PostgreSQL positive and adverse cases for each Value type and unit,
   wrong owner, stale version, support mismatch/revision change, validity
   change, replay conflict, ambiguous selection, active collision, search-fence
-  failure, and rollback. Add a production-entry positive/adverse scenario when
-  the public contract changes.
+  failure, and rollback. Include two effective supports with the same canonical
+  evidence and span but different occurrence IDs. Add a production-entry
+  positive/adverse scenario when the public contract changes, including that
+  occurrence collision.
 
 No new field, migration, registry description, public API, or ADR is proposed
 for acceptance by issue #429 itself.
@@ -282,7 +317,9 @@ including:
 - stale-version and support-revision fences in
   `internal/knowledge/postgres/relationship_correction_fence_integration_test.go:13-150`;
 - occurrence provenance in
-  `internal/knowledge/postgres/relationship_correction_occurrence_integration_test.go:14-94`;
+  `internal/knowledge/postgres/relationship_correction_occurrence_integration_test.go:14-94`
+  (one occurrence; no existing direct correction case covers colliding tuples
+  from two distinct occurrences);
 - known-evidence ownership and support isolation in
   `internal/knowledge/postgres/known_evidence_support_integration_test.go:316-390`;
 - public correction success, adverse provider cases, stale state, and
