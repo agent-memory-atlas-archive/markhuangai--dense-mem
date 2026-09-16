@@ -12,9 +12,11 @@ const (
 	returnedHypothesisID      = "<returned_hypothesis_id>"
 	returnedSubmissionID      = "<returned_submission_id>"
 	returnedConfirmationToken = "<returned_confirmation_token>"
-	returnedCandidateEntityID = "<returned_candidate_entity_id>"
+	returnedObjectCandidateID = "<returned_object_candidate_entity_id>"
 	newOperationKey           = "<new_retained_operation_key>"
 	newConfirmationKey        = "<new_retained_confirmation_key>"
+
+	contractExampleRequestInstruction = "Example request (replace each <returned_...> placeholder with its documented prerequisite result; generate and retain each <new_..._key> before calling):\n"
 )
 
 type contractToolExample struct {
@@ -42,7 +44,7 @@ func contractToolDescription(name string) string {
 	sections := []string{
 		"When to use: " + example.WhenToUse,
 		"Prerequisites: " + example.Prerequisites,
-		"Example request (replace every <...> placeholder with a value from this operation before calling):\n" + contractExampleJSON(example.Request),
+		contractExampleRequestInstruction + contractExampleJSON(example.Request),
 		"Result: " + example.Result,
 		"Next action: " + example.NextAction,
 	}
@@ -50,7 +52,7 @@ func contractToolDescription(name string) string {
 		sections = append(sections, strings.Join([]string{
 			"Conditional continuation — " + continuation.When,
 			"Prerequisites: " + continuation.Prerequisites,
-			"Example request (replace every <...> placeholder with a value returned by the prerequisite call):\n" + contractExampleJSON(continuation.Request),
+			contractExampleRequestInstruction + contractExampleJSON(continuation.Request),
 			"Result: " + continuation.Result,
 			"Next action: " + continuation.NextAction,
 		}, "\n"))
@@ -124,12 +126,12 @@ func contractToolExamples() map[string]contractToolExample {
 			NextAction: "Use the supplied continuation only when confirmation is requested. For stale state or support_set_mismatch, refresh trace and submit a new correction with a new key.",
 			Continuations: []contractToolExampleContinuation{{
 				When:          "the submit result has processing_state awaiting_confirmation",
-				Prerequisites: "Use only submission_id, confirmation_token, and candidate Entity IDs returned by that submit result; retain a distinct confirmation key.",
+				Prerequisites: "This valid example illustrates object_entity candidates. Use submission_id and confirmation_token returned by submit. For every endpoint represented in candidates, choose exactly one returned entity_id: place a subject_entity choice in subject_entity_id and an object_entity choice in object_entity_id; include no selection field for an endpoint that is not represented. Generate and retain a distinct confirmation key.",
 				Request: map[string]any{
 					"action":             "confirm",
 					"submission_id":      returnedSubmissionID,
 					"confirmation_token": returnedConfirmationToken,
-					"selection":          map[string]any{"object_entity_id": returnedCandidateEntityID},
+					"selection":          map[string]any{"object_entity_id": returnedObjectCandidateID},
 					"idempotency_key":    newConfirmationKey,
 				},
 				Result:     "The terminal result either completes the correction or returns bounded rejection or failure guidance.",

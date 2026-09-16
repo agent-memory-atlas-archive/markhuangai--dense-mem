@@ -11,6 +11,8 @@ import (
 	"github.com/markhuangai/dense-mem/internal/tools/registry"
 )
 
+const discoveryExampleRequestPrefix = "Example request (replace each <returned_...> placeholder with its documented prerequisite result; generate and retain each <new_..._key> before calling):\n"
+
 func testConformanceToolExamples(t *testing.T) {
 	t.Helper()
 	logger, _ := testLogger(t)
@@ -105,12 +107,11 @@ func contractDescription(name string) (string, bool) {
 
 func discoveryExampleRequest(t *testing.T, description string) map[string]any {
 	t.Helper()
-	const prefix = "Example request (replace every <...> placeholder with a value from this operation before calling):\n"
-	start := strings.Index(description, prefix)
+	start := strings.Index(description, discoveryExampleRequestPrefix)
 	if start < 0 {
 		t.Fatal("description has no primary example request")
 	}
-	encoded := description[start+len(prefix):]
+	encoded := description[start+len(discoveryExampleRequestPrefix):]
 	end := strings.Index(encoded, "\n\nResult:")
 	if end < 0 {
 		t.Fatal("description has no primary example result")

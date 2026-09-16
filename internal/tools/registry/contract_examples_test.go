@@ -34,6 +34,9 @@ func TestContractToolExamplesValidateAgainstCurrentSchemas(t *testing.T) {
 			}
 		}
 		description := contractToolDescription(name)
+		if got, want := strings.Count(description, contractExampleRequestInstruction), 1+len(example.Continuations); got != want {
+			t.Fatalf("%s example instructions = %d, want %d", name, got, want)
+		}
 		for _, section := range []string{"When to use:", "Prerequisites:", "Example request", "Result:", "Next action:"} {
 			if !strings.Contains(description, section) {
 				t.Fatalf("%s description missing %q", name, section)
@@ -161,6 +164,39 @@ func TestCorrectionExampleUsesReturnedTraceState(t *testing.T) {
 	require.NoError(t, ValidateContractInput(tool, instantiateContractExampleRequest(t, example), tool.RequiredScopes))
 }
 
+func TestCorrectionContinuationMapsReturnedCandidateEndpoints(t *testing.T) {
+	description := contractToolDescription(ToolCorrectRelationship)
+	for _, want := range []string{
+		"valid example illustrates object_entity candidates",
+		"every endpoint represented in candidates",
+		"subject_entity choice in subject_entity_id",
+		"object_entity choice in object_entity_id",
+		"no selection field for an endpoint that is not represented",
+		"Generate and retain a distinct confirmation key",
+	} {
+		if !strings.Contains(description, want) {
+			t.Fatalf("correction continuation guidance missing %q", want)
+		}
+	}
+
+	continuations := contractToolExamples()[ToolCorrectRelationship].Continuations
+	if len(continuations) != 1 {
+		t.Fatalf("correction continuations = %d, want 1", len(continuations))
+	}
+	selection := continuations[0].Request["selection"].(map[string]any)
+	if got := selection["object_entity_id"]; got != returnedObjectCandidateID {
+		t.Fatalf("object candidate placeholder = %#v", got)
+	}
+	if _, exists := selection["subject_entity_id"]; exists {
+		t.Fatalf("object-only example included subject selection: %#v", selection)
+	}
+	tool, err := requireTool(toolMap(t), ToolCorrectRelationship)
+	if err != nil {
+		t.Fatal(err)
+	}
+	require.NoError(t, ValidateContractInput(tool, instantiateContractExampleRequest(t, continuations[0].Request), tool.RequiredScopes))
+}
+
 func TestContractToolExamplesDescribeBoundedRecovery(t *testing.T) {
 	feedback := contractToolDescription(ToolSubmitRecallSessionFeedback)
 	for _, want := range []string{"failed_index", "next_action", "remediation", "correct_and_resubmit", "retry_same_request", "stop"} {
@@ -194,7 +230,7 @@ func instantiateContractExampleRequest(t *testing.T, request map[string]any) map
 		returnedHypothesisID:      uuid.NewString(),
 		returnedSubmissionID:      uuid.NewString(),
 		returnedConfirmationToken: uuid.NewString(),
-		returnedCandidateEntityID: uuid.NewString(),
+		returnedObjectCandidateID: uuid.NewString(),
 		newOperationKey:           "example-operation-" + uuid.NewString(),
 		newConfirmationKey:        "example-confirmation-" + uuid.NewString(),
 	}
