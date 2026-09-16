@@ -176,6 +176,32 @@ matching and sending both fails duplicate-span validation
 and `626-635`). This supported state has no complete public correction path,
 even when the caller knows both occurrences and the trace is complete.
 
+Alias-backed evidence requires an explicit ID conversion without duplicate
+spans. `trace_memory` publishes the canonical fragment ID when a support's raw
+fragment is present in `evidence_exact_aliases`, while correction support
+matching compares the raw `support.fragment_id` loaded from PostgreSQL
+(`internal/trace/postgres/semantic_trace_repository.go:369-400`,
+`internal/knowledge/postgres/relationship_correction_helpers.go:128-197`, and
+`internal/knowledge/postgres/relationship_correction_repository.go:626-635`).
+For migrated alias rows, the backfill sets `occurrence_id` to that raw alias
+fragment ID, and trace exposes `occurrence_id`; the client can use that value as
+the correction input's `evidence_id` with the same span
+(`migrations/postgres/v2_6/20260903010001_evidence_occurrence_duplicates.sql:550-598`).
+Using the canonical trace `evidence_id` alone produces `support_set_mismatch`.
+Do not substitute an occurrence ID for every support: ordinary occurrence IDs
+can identify a distinct occurrence rather than the raw fragment ID, so the
+conversion must be confirmed per support.
+
+Validity has a separate correction limit. `correct_relationship` copies the
+source `valid_from` and `valid_to` values; it has no validity-window patch.
+One-cardinality supersession also selects only Relationships with the same
+`valid_from` (`internal/knowledge/postgres/semantic_support_helpers.go:18-38`).
+Consequently, a mis-extracted validity window has no current atomic correction
+path: `correction_target` cannot change it, and a new `remember` proposal with a
+different window can leave the original active rather than replacing it. Use
+fresh `remember` evidence only when the real-world fact or validity actually
+changed later; do not route a validity mis-extraction through that path.
+
 Obtaining the complete set has a separate read limit. `trace_memory` leaves
 `MaxEvents` unset, which the PostgreSQL adapter defaults to 100, and
 `export_memory_pack` sets it to 100 explicitly (`internal/trace/service.go:70-82`,
@@ -228,7 +254,8 @@ retraction, but not the repository's internal `RetractRelationship` method
 | Source version is stale | `correction_target.expected_version` is checked during the semantic commit; a mismatch rejects the Remember transaction. | Submit and confirm fence the source version; pending confirmation becomes a bounded changed-state rejection. | Refresh and retry with a new key when an independent version change caused staleness. Matching-sibling correction-target rollback leaves the target unchanged, so do not repeat that request: use eligible Entity/predicate correction or the documented no-current-workflow outcome for typed Values. | Require the source expected version for Value patches and return the existing typed stale result without partial state. |
 | Support is missing, altered, or from the wrong space | Accepted Relationships require support; known evidence is bounded and must not replace submitted support. | Support spans must exactly match effective supports, contain at most 200 entries, and remain in the Relationship's memory space; truncation is rejected. | Preserve exact evidence IDs, occurrences, spans, source revisions, and space ownership. Trace/export reads return at most 100 support rows without pagination; do not infer the complete effective set from a truncated result. | Reuse exact effective support only for a proven mis-extraction; keep support and space checks identical. |
 | Two effective supports share an evidence ID and span but differ in occurrence ID | Can preserve both occurrence-specific supports on one Relationship. | The input cannot distinguish them: one tuple fails full-set matching and two identical tuples fail validation. | No complete public correction path exists for this state; do not collapse distinct occurrence provenance. | Decide how correction identifies and preserves each occurrence, then prove the colliding-tuple case with real PostgreSQL and production-entry tests. |
-| Validity needs correction | Remember can propose ordered `valid_from`/`valid_to` values as part of a new observation. | Correction copies the source validity window; no validity patch is exposed. | A changed validity assertion is fresh evidence; a future correction extension must specify its evidence rule. | Either require evidence that contains the corrected window or route the request to fresh Remember; never infer the window. |
+| A support is stored under an exact-evidence alias | Can retain the alias-backed support and its canonical occurrence provenance. | Trace publishes the canonical fragment ID, while correction matching expects the raw alias fragment ID. For migrated alias rows, trace `occurrence_id` carries that raw ID and can be submitted as `evidence_id`; the canonical ID alone yields `support_set_mismatch`. | Convert migrated alias supports from `occurrence_id` to the correction input's `evidence_id`, confirm the mapping per support, and preserve all other fences. | Keep the conversion explicit and prove alias-backed and ordinary occurrence cases with real PostgreSQL and production-entry tests. |
+| Validity was mis-extracted from the cited evidence | Can propose a different ordered validity window, but this does not atomically replace the existing Relationship. | Correction copies the source validity window; no validity patch is exposed, and one-cardinality supersession requires the same `valid_from`. | No complete current atomic correction exists. Do not route a mis-extracted window to fresh Remember or infer a replacement through `correction_target`. | Require a validity patch whose evidence explicitly supports the corrected window, with the same owner, version, support, and atomic supersession fences. |
 | Retry or replay | Whole-request hash and durable attempt state replay the authoritative result or return an idempotency conflict. | Correction hash and durable submission replay the authoritative receipt or reject a changed request under the same key. | Keep retry keys scoped to the authenticated team/profile and include every correction field in the hash. | Include the complete typed-Value patch, support set, validity, and reason in the existing correction hash. |
 | Provenance and atomicity | Evidence, observation, verification, support, search state, and optional cross-reference commit together. | Original/successor states, copied supports, cross-reference, correction event, search state, and receipt commit together. | Never claim a successful lineage link is an atomic replacement. | Keep provider work outside the transaction and atomically commit Value resolution, source supersession, successor, lineage, history, and search state. |
 
@@ -273,9 +300,9 @@ existing lifecycle owner and correction transaction:
   mutate a `value_records` row in place; resolve or create the canonical Value
   and point the successor Relationship at it.
 - Decide validity-window patch semantics explicitly. A correction that changes
-  validity must either reuse evidence that states the corrected window or be
-  routed through fresh Remember evidence; it must never infer a new time window
-  from an old span that does not contain it.
+  validity must reuse evidence that states the corrected window; an actual
+  later fact or validity change is routed through fresh Remember evidence. It
+  must never infer a new time window from an old span that does not contain it.
 - Retain the current owner, expected-version, active/canonical/support-count,
   exact-support, memory-space, collision, confirmation, request-hash, provider
   fence, and search-document invariants. Keep provider execution outside the
@@ -286,7 +313,9 @@ existing lifecycle owner and correction transaction:
   admitted through this support-reuse path merely because its Value has the
   same type or unit. Decide whether correction input carries occurrence identity
   or uses another deterministic preservation mechanism when distinct supports
-  share a public evidence/span tuple.
+  share a public evidence/span tuple. Preserve the alias-to-raw-fragment
+  conversion for migrated exact-evidence aliases and do not apply it to
+  ordinary occurrence IDs without confirming the mapping.
 - Add real PostgreSQL positive and adverse cases for each Value type and unit,
   wrong owner, stale version, support mismatch/revision change, validity
   change, replay conflict, ambiguous selection, active collision, search-fence
@@ -320,6 +349,11 @@ including:
   `internal/knowledge/postgres/relationship_correction_occurrence_integration_test.go:14-94`
   (one occurrence; no existing direct correction case covers colliding tuples
   from two distinct occurrences);
+- exact-evidence alias canonicalization in
+  `internal/trace/postgres/semantic_trace_repository.go:369-400` and
+  `migrations/postgres/v2_6/20260903010001_evidence_occurrence_duplicates.sql:69-87`
+  (no existing direct correction case covers converting the public canonical
+  ID to the migrated alias's raw ID via `occurrence_id`);
 - known-evidence ownership and support isolation in
   `internal/knowledge/postgres/known_evidence_support_integration_test.go:316-390`;
 - public correction success, adverse provider cases, stale state, and
