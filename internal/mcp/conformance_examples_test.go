@@ -86,6 +86,12 @@ func testConformanceToolExamples(t *testing.T) {
 	if invocations[registry.ToolRemember] != 1 {
 		t.Fatalf("invalid discovered example invoked remember %d times", invocations[registry.ToolRemember])
 	}
+
+	correction := discoveryExampleRequest(t, descriptions[registry.ToolCorrectRelationship])
+	correctionCall := conformanceRPC(t, server, toolCallRequest(t, 10, registry.ToolCorrectRelationship, correction))
+	if correctionCall.Error != nil || invocations[registry.ToolCorrectRelationship] != 1 {
+		t.Fatalf("discovered correction example = error:%+v invocations:%d", correctionCall.Error, invocations[registry.ToolCorrectRelationship])
+	}
 }
 
 func contractDescription(name string) (string, bool) {
@@ -120,7 +126,7 @@ func replaceDiscoveryPlaceholders(value any) any {
 	switch typed := value.(type) {
 	case string:
 		if strings.HasPrefix(typed, "<") && strings.HasSuffix(typed, ">") {
-			return "example-" + uuid.NewString()
+			return uuid.NewString()
 		}
 		return typed
 	case map[string]any:

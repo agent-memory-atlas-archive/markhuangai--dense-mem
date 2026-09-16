@@ -119,6 +119,48 @@ func TestDreamConfirmationExampleRequiresIndependentEvidence(t *testing.T) {
 	require.NoError(t, ValidateContractInput(tool, input, tool.RequiredScopes))
 }
 
+func TestCorrectionExampleUsesReturnedTraceState(t *testing.T) {
+	description := contractToolDescription(ToolCorrectRelationship)
+	for _, want := range []string{
+		"owned active Relationship trace whose stopped_reason is null",
+		"Trace evidence_supports is lineage, not a correction-ready set",
+		"latest evidence_support_decision_events decision is grant or reinstate",
+		"exclude revoke",
+		"span_start, and span_end to supports[].evidence_id, start, and end",
+		"refresh trace or stop",
+		"numeric values in this valid example only",
+		"complete supports array",
+		"support_set_mismatch",
+	} {
+		if !strings.Contains(description, want) {
+			t.Fatalf("correction guidance missing %q", want)
+		}
+	}
+	traceDescription := contractToolDescription(ToolTraceMemory)
+	for _, want := range []string{"support lineage, not a correction-ready set", "latest-decision selection", "span_start/span_end mapping", "non-null stopped_reason", "refresh trace or stop"} {
+		if !strings.Contains(traceDescription, want) {
+			t.Fatalf("trace guidance missing %q", want)
+		}
+	}
+
+	example := contractToolExamples()[ToolCorrectRelationship].Request
+	if version, ok := example["expected_version"].(int); !ok || version != 1 {
+		t.Fatalf("correction version = %#v", example["expected_version"])
+	}
+	support := example["supports"].([]any)[0].(map[string]any)
+	if start, ok := support["start"].(int); !ok || start != 0 {
+		t.Fatalf("correction support start = %#v", support["start"])
+	}
+	if end, ok := support["end"].(int); !ok || end != 43 {
+		t.Fatalf("correction support end = %#v", support["end"])
+	}
+	tool, err := requireTool(toolMap(t), ToolCorrectRelationship)
+	if err != nil {
+		t.Fatal(err)
+	}
+	require.NoError(t, ValidateContractInput(tool, instantiateContractExampleRequest(t, example), tool.RequiredScopes))
+}
+
 func TestContractToolExamplesDescribeBoundedRecovery(t *testing.T) {
 	feedback := contractToolDescription(ToolSubmitRecallSessionFeedback)
 	for _, want := range []string{"failed_index", "next_action", "remediation", "correct_and_resubmit", "retry_same_request", "stop"} {

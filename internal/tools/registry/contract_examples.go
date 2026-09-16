@@ -106,7 +106,7 @@ func contractToolExamples() map[string]contractToolExample {
 		},
 		ToolCorrectRelationship: {
 			WhenToUse:     "Replace one caller-owned active Relationship while preserving its evidence provenance and superseding the original atomically.",
-			Prerequisites: "Use the current relationship_id, version, and evidence support span returned by trace; create and retain a fresh operation key.",
+			Prerequisites: "Start with an owned active Relationship trace whose stopped_reason is null. Trace evidence_supports is lineage, not a correction-ready set: for each evidence_support_id, retain a support only when its latest evidence_support_decision_events decision is grant or reinstate; exclude revoke. Map its evidence_id, span_start, and span_end to supports[].evidence_id, start, and end. If a support has no latest decision or trace state is bounded or ambiguous, refresh trace or stop. The numeric values in this valid example only show field shapes: replace expected_version and the complete supports array with the current trace values; create and retain a fresh operation key.",
 			Request: map[string]any{
 				"action":           "submit",
 				"relationship_id":  returnedRelationshipID,
@@ -121,7 +121,7 @@ func contractToolExamples() map[string]contractToolExample {
 				"idempotency_key": newOperationKey,
 			},
 			Result:     "A completed result names the superseded original and active successor. An awaiting_confirmation result supplies a submission_id, confirmation_token, and candidate Entity IDs.",
-			NextAction: "Use the supplied continuation only when confirmation is requested. For stale state, refresh the Relationship and submit a new correction with a new key.",
+			NextAction: "Use the supplied continuation only when confirmation is requested. For stale state or support_set_mismatch, refresh trace and submit a new correction with a new key.",
 			Continuations: []contractToolExampleContinuation{{
 				When:          "the submit result has processing_state awaiting_confirmation",
 				Prerequisites: "Use only submission_id, confirmation_token, and candidate Entity IDs returned by that submit result; retain a distinct confirmation key.",
@@ -160,7 +160,7 @@ func contractToolExamples() map[string]contractToolExample {
 				"max_edges":                50,
 			},
 			Result:     "The result connects the Relationship to evidence_supports, evidence, verification events, transitions, conflicts, and lineage within the requested bounds.",
-			NextAction: "Use returned current support spans and version only for an owned correction or retraction. Treat truncation or stopped_reason as a bound, not missing provenance.",
+			NextAction: "Trace returns support lineage, not a correction-ready set. For an owned correction, use correct_relationship's latest-decision selection and span_start/span_end mapping. A non-null stopped_reason is a bound: refresh trace or stop; never infer a complete support set.",
 		},
 		ToolSubmitRecallSessionFeedback: {
 			WhenToUse:     "Record bounded, truthful feedback about a recall session.",
