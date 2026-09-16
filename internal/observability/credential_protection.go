@@ -462,32 +462,34 @@ func safeErrorText(err error) (text string, ok bool) {
 }
 
 type credentialVariant struct {
-	text               string
-	foldPercentEscapes bool
+	text                 string
+	foldPercentEscapes   bool
+	foldUnicodeEscapes   bool
+	allowPercentEncoding bool
 }
 
 func credentialVariants(secrets []string) []credentialVariant {
 	variants := make([]credentialVariant, 0, len(secrets)*7)
 	seen := make(map[credentialVariant]struct{}, len(secrets)*7)
 	for _, secret := range secrets {
-		addCredentialVariant(seen, &variants, secret, false)
+		addCredentialVariant(seen, &variants, secret, false, false, true)
 		if secret == "" {
 			continue
 		}
 		if encoded, err := json.Marshal(secret); err == nil && len(encoded) >= 2 {
-			addCredentialVariant(seen, &variants, string(encoded[1:len(encoded)-1]), false)
+			addCredentialVariant(seen, &variants, string(encoded[1:len(encoded)-1]), false, true, false)
 		}
 		quoted := strconv.Quote(secret)
 		if len(quoted) >= 2 {
-			addCredentialVariant(seen, &variants, quoted[1:len(quoted)-1], false)
+			addCredentialVariant(seen, &variants, quoted[1:len(quoted)-1], false, true, false)
 		}
 		quotedASCII := strconv.QuoteToASCII(secret)
 		if len(quotedASCII) >= 2 {
-			addCredentialVariant(seen, &variants, quotedASCII[1:len(quotedASCII)-1], false)
+			addCredentialVariant(seen, &variants, quotedASCII[1:len(quotedASCII)-1], false, true, false)
 		}
 		for _, encoded := range []string{url.QueryEscape(secret), url.PathEscape(secret), userInfoEscape(secret)} {
-			addCredentialVariant(seen, &variants, encoded, true)
-			addCredentialVariant(seen, &variants, lowerPercentEscapes(encoded), true)
+			addCredentialVariant(seen, &variants, encoded, true, false, false)
+			addCredentialVariant(seen, &variants, lowerPercentEscapes(encoded), true, false, false)
 		}
 	}
 	sort.Slice(variants, func(left, right int) bool {
@@ -496,6 +498,12 @@ func credentialVariants(secrets []string) []credentialVariant {
 		}
 		if variants[left].text != variants[right].text {
 			return variants[left].text < variants[right].text
+		}
+		if variants[left].allowPercentEncoding != variants[right].allowPercentEncoding {
+			return variants[left].allowPercentEncoding
+		}
+		if variants[left].foldUnicodeEscapes != variants[right].foldUnicodeEscapes {
+			return variants[left].foldUnicodeEscapes
 		}
 		return !variants[left].foldPercentEscapes && variants[right].foldPercentEscapes
 	})
@@ -525,16 +533,27 @@ func mergeCredentialVariants(existing, additional []credentialVariant) []credent
 		if merged[left].text != merged[right].text {
 			return merged[left].text < merged[right].text
 		}
+		if merged[left].allowPercentEncoding != merged[right].allowPercentEncoding {
+			return merged[left].allowPercentEncoding
+		}
+		if merged[left].foldUnicodeEscapes != merged[right].foldUnicodeEscapes {
+			return merged[left].foldUnicodeEscapes
+		}
 		return !merged[left].foldPercentEscapes && merged[right].foldPercentEscapes
 	})
 	return merged
 }
 
-func addCredentialVariant(seen map[credentialVariant]struct{}, variants *[]credentialVariant, text string, foldPercentEscapes bool) {
+func addCredentialVariant(seen map[credentialVariant]struct{}, variants *[]credentialVariant, text string, foldPercentEscapes, foldUnicodeEscapes, allowPercentEncoding bool) {
 	if text == "" {
 		return
 	}
-	variant := credentialVariant{text: text, foldPercentEscapes: foldPercentEscapes}
+	variant := credentialVariant{
+		text:                 text,
+		foldPercentEscapes:   foldPercentEscapes,
+		foldUnicodeEscapes:   foldUnicodeEscapes,
+		allowPercentEncoding: allowPercentEncoding,
+	}
 	if _, exists := seen[variant]; exists {
 		return
 	}
@@ -603,11 +622,11 @@ func redactCredentialTextBounded(text string, variants []credentialVariant, maxO
 	outputLength := 0
 	changed := false
 	for index := 0; index < len(text); {
-		matched, ok := credentialMatchAt(text[index:], variants)
+		_, consumed, ok := credentialMatchAt(text[index:], variants)
 		increment := 0
 		if ok {
 			increment = len(CredentialProtectionRedacted)
-			index += len(matched.text)
+			index += consumed
 			changed = true
 		} else {
 			_, size := utf8.DecodeRuneInString(text[index:])
@@ -629,11 +648,11 @@ func redactCredentialTextBounded(text string, variants []credentialVariant, maxO
 	output := make([]byte, outputLength)
 	outputIndex := 0
 	for index := 0; index < len(text); {
-		matched, ok := credentialMatchAt(text[index:], variants)
+		_, consumed, ok := credentialMatchAt(text[index:], variants)
 		if ok {
 			copy(output[outputIndex:], CredentialProtectionRedacted)
 			outputIndex += len(CredentialProtectionRedacted)
-			index += len(matched.text)
+			index += consumed
 			continue
 		}
 		_, size := utf8.DecodeRuneInString(text[index:])
@@ -644,32 +663,69 @@ func redactCredentialTextBounded(text string, variants []credentialVariant, maxO
 	return string(output), true
 }
 
-func credentialMatchAt(text string, variants []credentialVariant) (credentialVariant, bool) {
+func credentialMatchAt(text string, variants []credentialVariant) (credentialVariant, int, bool) {
 	for _, variant := range variants {
-		if len(variant.text) <= len(text) && credentialPrefix(text, variant) {
-			return variant, true
+		if consumed, ok := credentialPrefix(text, variant); ok {
+			return variant, consumed, true
 		}
 	}
-	return credentialVariant{}, false
+	return credentialVariant{}, 0, false
 }
 
-func credentialPrefix(text string, variant credentialVariant) bool {
-	if !variant.foldPercentEscapes {
-		return strings.HasPrefix(text, variant.text)
+func credentialPrefix(text string, variant credentialVariant) (int, bool) {
+	if variant.allowPercentEncoding {
+		return percentEncodedPrefix(text, variant.text)
+	}
+	if len(variant.text) > len(text) {
+		return 0, false
+	}
+	if !variant.foldPercentEscapes && !variant.foldUnicodeEscapes {
+		if !strings.HasPrefix(text, variant.text) {
+			return 0, false
+		}
+		return len(variant.text), true
 	}
 	for index := 0; index < len(variant.text); index++ {
-		if variant.text[index] == '%' && index+2 < len(variant.text) && isHexDigit(variant.text[index+1]) && isHexDigit(variant.text[index+2]) {
+		if variant.foldPercentEscapes && variant.text[index] == '%' && index+2 < len(variant.text) && isHexDigit(variant.text[index+1]) && isHexDigit(variant.text[index+2]) {
 			if text[index] != '%' || !sameHexDigit(text[index+1], variant.text[index+1]) || !sameHexDigit(text[index+2], variant.text[index+2]) {
-				return false
+				return 0, false
 			}
 			index += 2
 			continue
 		}
+		if variant.foldUnicodeEscapes && variant.text[index] == '\\' && index+5 < len(variant.text) && variant.text[index+1] == 'u' && isHexDigit(variant.text[index+2]) && isHexDigit(variant.text[index+3]) && isHexDigit(variant.text[index+4]) && isHexDigit(variant.text[index+5]) {
+			if text[index] != '\\' || text[index+1] != 'u' || !sameHexDigit(text[index+2], variant.text[index+2]) || !sameHexDigit(text[index+3], variant.text[index+3]) || !sameHexDigit(text[index+4], variant.text[index+4]) || !sameHexDigit(text[index+5], variant.text[index+5]) {
+				return 0, false
+			}
+			index += 5
+			continue
+		}
 		if text[index] != variant.text[index] {
-			return false
+			return 0, false
 		}
 	}
-	return true
+	return len(variant.text), true
+}
+
+func percentEncodedPrefix(text, variant string) (int, bool) {
+	textIndex := 0
+	for variantIndex := 0; variantIndex < len(variant); variantIndex++ {
+		if textIndex >= len(text) {
+			return 0, false
+		}
+		if text[textIndex] == '%' && textIndex+2 < len(text) && isHexDigit(text[textIndex+1]) && isHexDigit(text[textIndex+2]) {
+			if hexByte(text[textIndex+1], text[textIndex+2]) != variant[variantIndex] {
+				return 0, false
+			}
+			textIndex += 3
+			continue
+		}
+		if text[textIndex] != variant[variantIndex] {
+			return 0, false
+		}
+		textIndex++
+	}
+	return textIndex, true
 }
 
 func isHexDigit(value byte) bool {
@@ -684,4 +740,19 @@ func sameHexDigit(left, right byte) bool {
 		right += 'a' - 'A'
 	}
 	return left == right
+}
+
+func hexByte(high, low byte) byte {
+	return hexDigit(high)<<4 | hexDigit(low)
+}
+
+func hexDigit(value byte) byte {
+	switch {
+	case value >= '0' && value <= '9':
+		return value - '0'
+	case value >= 'a' && value <= 'f':
+		return value - 'a' + 10
+	default:
+		return value - 'A' + 10
+	}
 }

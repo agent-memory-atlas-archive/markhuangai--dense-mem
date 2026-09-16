@@ -108,9 +108,23 @@ func TestCredentialProtectorMatchesMixedCasePercentEscapes(t *testing.T) {
 	require.Empty(t, got.UnavailableReason)
 	require.Equal(t, "postgres://u:"+CredentialProtectionRedacted+"@host/db", got.Value)
 
+	got = NewCredentialProtector("abc").Snapshot("credential=%61bc", 256)
+	require.Empty(t, got.UnavailableReason)
+	require.Equal(t, "credential="+CredentialProtectionRedacted, got.Value)
+
 	literal := NewCredentialProtector("foo%2F").Snapshot("foo%2f", 64)
 	require.Empty(t, literal.UnavailableReason)
 	require.Equal(t, "foo%2f", literal.Value)
+}
+
+func TestCredentialProtectorMatchesMixedCaseJSONUnicodeEscapes(t *testing.T) {
+	got := NewCredentialProtector("<").Snapshot(`{"password":"\u003C"}`, 256)
+	require.Empty(t, got.UnavailableReason)
+	require.Equal(t, `{"password":"`+CredentialProtectionRedacted+`"}`, got.Value)
+
+	jsonValue := NewCredentialProtector("abc").Snapshot([]byte(`{"password":"%61bc"}`), 256)
+	require.Empty(t, jsonValue.UnavailableReason)
+	require.Equal(t, map[string]any{"password": CredentialProtectionRedacted}, jsonValue.Value)
 }
 
 func TestCredentialProtectorRejectsUnsafeValuesWithoutRawFallback(t *testing.T) {
