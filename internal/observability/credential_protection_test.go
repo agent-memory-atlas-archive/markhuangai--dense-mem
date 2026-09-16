@@ -145,6 +145,11 @@ func TestCredentialProtectorMatchesComposedJSONAndPercentEncoding(t *testing.T) 
 	got = NewCredentialProtector("a").Snapshot([]byte(input), 256)
 	require.Empty(t, got.UnavailableReason)
 	require.Equal(t, map[string]any{"url": "?token=" + CredentialProtectionRedacted}, got.Value)
+
+	input = `https://e.test/?payload=%7B%22password%22%3A%22%5Cu0073ecret-key%22%7D`
+	got = NewCredentialProtector("secret-key").Snapshot(input, 256)
+	require.Empty(t, got.UnavailableReason)
+	require.Equal(t, `https://e.test/?payload=%7B%22password%22%3A%22`+CredentialProtectionRedacted+`%22%7D`, got.Value)
 }
 
 func TestCredentialProtectorMatchesSurrogateUnicodeEscapes(t *testing.T) {

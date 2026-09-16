@@ -760,73 +760,12 @@ func encodedCredentialPrefix(text, variant string, allowPercentEncoding, allowUn
 			return consumed, true
 		}
 	}
+	if allowPercentEncoding && allowUnicodeEncoding {
+		if consumed, ok := reverseDecodedCredentialPrefix(text, variant); ok {
+			return consumed, true
+		}
+	}
 	return literalCredentialPrefix(text, variant, allowPercentEncoding, allowUnicodeEncoding)
-}
-
-type credentialDecodedByte struct {
-	value byte
-	end   int
-}
-
-func decodedCredentialPrefix(text, variant string, allowPercentEncoding bool) (int, bool) {
-	maxFirstBytes := len(variant)
-	if maxFirstBytes <= int(^uint(0)>>1)/3 {
-		maxFirstBytes *= 3
-	}
-	firstLayer := make([]credentialDecodedByte, 0, maxFirstBytes)
-	textIndex := 0
-	for textIndex < len(text) && len(firstLayer) < maxFirstBytes {
-		if decoded, consumed, ok := decodeGoByteEscape(text[textIndex:]); ok {
-			firstLayer = append(firstLayer, credentialDecodedByte{value: decoded, end: textIndex + consumed})
-			textIndex += consumed
-			continue
-		}
-		if decoded, consumed, ok := decodeEscapedRune(text[textIndex:]); ok {
-			var encoded [utf8.UTFMax]byte
-			encodedSize := utf8.EncodeRune(encoded[:], decoded)
-			for index := 0; index < encodedSize && len(firstLayer) < maxFirstBytes; index++ {
-				firstLayer = append(firstLayer, credentialDecodedByte{value: encoded[index], end: textIndex + consumed})
-			}
-			textIndex += consumed
-			continue
-		}
-		_, size := utf8.DecodeRuneInString(text[textIndex:])
-		if size == 0 {
-			return 0, false
-		}
-		for index := 0; index < size && len(firstLayer) < maxFirstBytes; index++ {
-			firstLayer = append(firstLayer, credentialDecodedByte{value: text[textIndex+index], end: textIndex + size})
-		}
-		textIndex += size
-	}
-
-	decoded := make([]credentialDecodedByte, 0, len(firstLayer))
-	for index := 0; index < len(firstLayer); {
-		if allowPercentEncoding && firstLayer[index].value == '%' && index+2 < len(firstLayer) && isHexDigit(firstLayer[index+1].value) && isHexDigit(firstLayer[index+2].value) {
-			decoded = append(decoded, credentialDecodedByte{
-				value: hexByte(firstLayer[index+1].value, firstLayer[index+2].value),
-				end:   firstLayer[index+2].end,
-			})
-			index += 3
-			continue
-		}
-		if allowPercentEncoding && firstLayer[index].value == '+' {
-			decoded = append(decoded, credentialDecodedByte{value: ' ', end: firstLayer[index].end})
-			index++
-			continue
-		}
-		decoded = append(decoded, firstLayer[index])
-		index++
-	}
-	if len(decoded) < len(variant) {
-		return 0, false
-	}
-	for index := 0; index < len(variant); index++ {
-		if decoded[index].value != variant[index] {
-			return 0, false
-		}
-	}
-	return decoded[len(variant)-1].end, true
 }
 
 func literalCredentialPrefix(text, variant string, allowPercentEncoding, allowUnicodeEncoding bool) (int, bool) {
