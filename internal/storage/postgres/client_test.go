@@ -109,7 +109,7 @@ func TestDBPingTimeout(t *testing.T) {
 }
 
 func TestMigrationDatabaseDSNUpdatesURL(t *testing.T) {
-	dsn := "postgres://test%20user:pa%20ss@localhost:5433/old%20db?sslmode=disable&application_name=dense+mem"
+	dsn := "postgres://test%20user:pa%20ss@localhost:5433/old%20db?sslmode=disable&application_name=dense%20mem"
 	got := migrationDatabaseDSN(t, dsn, "new db")
 
 	config, err := pgconn.ParseConfig(got)

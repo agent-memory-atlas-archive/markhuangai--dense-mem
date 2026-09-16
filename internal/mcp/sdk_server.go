@@ -53,19 +53,24 @@ func newSDKLogger(delegate *slog.Logger) *slog.Logger {
 // NewSDKHTTPHandler creates a stateless official-SDK transport backed by the
 // request-scoped registry, authorization, and prompt catalog.
 func (s *Server) NewSDKHTTPHandler(jsonResponse bool) http.Handler {
-	transport := sdkmcp.NewStreamableHTTPHandler(func(req *http.Request) *sdkmcp.Server {
-		return s.newSDKServer(req.Context())
-	}, &sdkmcp.StreamableHTTPOptions{
-		Stateless:                    true,
-		JSONResponse:                 jsonResponse,
-		MaxRequestBodyBytes:          4 << 20,
-		PropagateRequestCancellation: true,
-	})
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		annotateSDKToolDispatch(req)
 		if s.writeSDKToolLookupError(w, req, jsonResponse) {
 			return
 		}
+		// The SDK may look up the server more than once while processing one request.
+		var server *sdkmcp.Server
+		transport := sdkmcp.NewStreamableHTTPHandler(func(req *http.Request) *sdkmcp.Server {
+			if server == nil {
+				server = s.newSDKServer(req.Context())
+			}
+			return server
+		}, &sdkmcp.StreamableHTTPOptions{
+			Stateless:                    true,
+			JSONResponse:                 jsonResponse,
+			MaxRequestBodyBytes:          4 << 20,
+			PropagateRequestCancellation: true,
+		})
 		transport.ServeHTTP(w, req)
 	})
 }
