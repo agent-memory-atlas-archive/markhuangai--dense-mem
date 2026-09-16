@@ -174,6 +174,17 @@ func TestCredentialProtectorMatchesRepeatedEncodingLayers(t *testing.T) {
 	}
 }
 
+func TestCredentialProtectorFailsClosedWhenEncodingLayersExceedBound(t *testing.T) {
+	encoded := "%71"
+	for index := 1; index < maxCredentialDecodeLayers+1; index++ {
+		encoded = url.QueryEscape(encoded)
+	}
+
+	got := NewCredentialProtector("q").Snapshot("token="+encoded, 256)
+	require.Equal(t, CredentialProtectionEncodingLimitExceeded, got.UnavailableReason)
+	require.Nil(t, got.Value)
+}
+
 func TestCredentialProtectorMatchesSurrogateUnicodeEscapes(t *testing.T) {
 	tests := []struct {
 		name   string

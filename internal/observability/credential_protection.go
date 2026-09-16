@@ -22,14 +22,15 @@ const (
 	// credential in an otherwise available diagnostic value.
 	CredentialProtectionRedacted = "[REDACTED]"
 
-	CredentialProtectionInvalidBudget      = "invalid_max_bytes"
-	CredentialProtectionBudgetExceeded     = "max_bytes_exceeded"
-	CredentialProtectionDepthExceeded      = "max_depth_exceeded"
-	CredentialProtectionCycleDetected      = "cycle_detected"
-	CredentialProtectionUnsupported        = "unsupported_value"
-	CredentialProtectionInvalidEncoding    = "invalid_encoding"
-	CredentialProtectionFormattingFailed   = "formatting_failed"
-	credentialProtectionGenericUnavailable = "diagnostic_unavailable"
+	CredentialProtectionInvalidBudget         = "invalid_max_bytes"
+	CredentialProtectionBudgetExceeded        = "max_bytes_exceeded"
+	CredentialProtectionDepthExceeded         = "max_depth_exceeded"
+	CredentialProtectionCycleDetected         = "cycle_detected"
+	CredentialProtectionUnsupported           = "unsupported_value"
+	CredentialProtectionInvalidEncoding       = "invalid_encoding"
+	CredentialProtectionFormattingFailed      = "formatting_failed"
+	CredentialProtectionEncodingLimitExceeded = "max_encoding_layers_exceeded"
+	credentialProtectionGenericUnavailable    = "diagnostic_unavailable"
 )
 
 // ProtectedDiagnostic is a detached operator-facing representation. An empty
@@ -96,7 +97,11 @@ func (p *CredentialProtector) Snapshot(value any, maxBytes int, authenticatedSec
 	if len(encoded) > maxBytes {
 		return unavailableDiagnostic(CredentialProtectionBudgetExceeded, variants)
 	}
-	if credentialTextContainsVariant(string(encoded), variants) {
+	contains, exhausted := credentialTextContainsVariantDetailed(string(encoded), variants)
+	if exhausted {
+		return unavailableDiagnostic(CredentialProtectionEncodingLimitExceeded, variants)
+	}
+	if contains {
 		return unavailableDiagnostic(CredentialProtectionFormattingFailed, variants)
 	}
 	return ProtectedDiagnostic{Value: snapshot}
@@ -279,11 +284,18 @@ func (w *credentialSnapshotWalker) protectText(text string, budget *credentialSn
 	if !utf8.ValidString(text) {
 		return "", CredentialProtectionInvalidEncoding
 	}
-	protected, ok := redactCredentialTextBounded(text, w.variants, budget.remainingEncoded())
+	protected, ok, reason := redactCredentialTextBounded(text, w.variants, budget.remainingEncoded())
 	if !ok {
-		return "", CredentialProtectionBudgetExceeded
+		if reason == "" {
+			reason = CredentialProtectionBudgetExceeded
+		}
+		return "", reason
 	}
-	if credentialTextContainsVariant(protected, w.variants) {
+	contains, exhausted := credentialTextContainsVariantDetailed(protected, w.variants)
+	if exhausted {
+		return "", CredentialProtectionEncodingLimitExceeded
+	}
+	if contains {
 		return "", CredentialProtectionFormattingFailed
 	}
 	return protected, ""
@@ -653,12 +665,15 @@ func jsonEncodedStringLen(text string) (int, bool) {
 	return length, true
 }
 
-func redactCredentialTextBounded(text string, variants []credentialVariant, maxOutput int) (string, bool) {
+func redactCredentialTextBounded(text string, variants []credentialVariant, maxOutput int) (string, bool, string) {
 	if maxOutput < 0 {
-		return "", false
+		return "", false, CredentialProtectionBudgetExceeded
 	}
 	if text == "" || len(variants) == 0 {
-		return text, len(text) <= maxOutput
+		if len(text) > maxOutput {
+			return "", false, CredentialProtectionBudgetExceeded
+		}
+		return text, true, ""
 	}
 
 	type credentialTextMatch struct {
@@ -669,7 +684,10 @@ func redactCredentialTextBounded(text string, variants []credentialVariant, maxO
 	outputLength := 0
 	matches := make([]credentialTextMatch, 0)
 	for index := 0; index < len(text); {
-		_, consumed, ok := credentialMatchAt(text[index:], variants)
+		_, consumed, ok, exhausted := credentialMatchAtDetailed(text[index:], variants)
+		if exhausted {
+			return "", false, CredentialProtectionEncodingLimitExceeded
+		}
 		increment := 0
 		if ok {
 			increment = len(CredentialProtectionRedacted)
@@ -678,18 +696,18 @@ func redactCredentialTextBounded(text string, variants []credentialVariant, maxO
 		} else {
 			_, size := utf8.DecodeRuneInString(text[index:])
 			if size == 0 {
-				return "", false
+				return "", false, CredentialProtectionBudgetExceeded
 			}
 			increment = size
 			index += size
 		}
 		if outputLength > maxOutput-increment {
-			return "", false
+			return "", false, CredentialProtectionBudgetExceeded
 		}
 		outputLength += increment
 	}
 	if len(matches) == 0 {
-		return text, true
+		return text, true, ""
 	}
 
 	output := make([]byte, outputLength)
@@ -701,152 +719,104 @@ func redactCredentialTextBounded(text string, variants []credentialVariant, maxO
 		textIndex = match.end
 	}
 	copy(output[outputIndex:], text[textIndex:])
-	return string(output), true
-}
-
-func credentialTextContainsVariant(text string, variants []credentialVariant) bool {
-	for index := 0; index < len(text); {
-		if _, _, ok := credentialMatchAt(text[index:], variants); ok {
-			return true
-		}
-		_, size := utf8.DecodeRuneInString(text[index:])
-		if size == 0 {
-			return true
-		}
-		index += size
-	}
-	return false
-}
-
-func credentialMatchAt(text string, variants []credentialVariant) (credentialVariant, int, bool) {
-	for _, variant := range variants {
-		if consumed, ok := credentialPrefix(text, variant); ok {
-			return variant, consumed, true
-		}
-	}
-	return credentialVariant{}, 0, false
+	return string(output), true, ""
 }
 
 func credentialPrefix(text string, variant credentialVariant) (int, bool) {
+	consumed, matched, _ := credentialPrefixDetailed(text, variant)
+	return consumed, matched
+}
+
+func credentialPrefixDetailed(text string, variant credentialVariant) (int, bool, bool) {
 	if variant.allowPercentEncoding {
-		return encodedCredentialPrefix(text, variant.text, true, variant.allowUnicodeEncoding)
+		return encodedCredentialPrefixDetailed(text, variant.text, true, variant.allowUnicodeEncoding)
 	}
 	if variant.allowUnicodeEncoding {
-		return encodedCredentialPrefix(text, variant.text, false, true)
+		return encodedCredentialPrefixDetailed(text, variant.text, false, true)
 	}
 	if len(variant.text) > len(text) {
-		return 0, false
+		return 0, false, false
 	}
 	if !variant.foldPercentEscapes && !variant.foldUnicodeEscapes {
 		if !strings.HasPrefix(text, variant.text) {
-			return 0, false
+			return 0, false, false
 		}
-		return len(variant.text), true
+		return len(variant.text), true, false
 	}
 	for index := 0; index < len(variant.text); index++ {
 		if variant.foldPercentEscapes && variant.text[index] == '%' && index+2 < len(variant.text) && isHexDigit(variant.text[index+1]) && isHexDigit(variant.text[index+2]) {
 			if text[index] != '%' || !sameHexDigit(text[index+1], variant.text[index+1]) || !sameHexDigit(text[index+2], variant.text[index+2]) {
-				return 0, false
+				return 0, false, false
 			}
 			index += 2
 			continue
 		}
 		if variant.foldUnicodeEscapes && variant.text[index] == '\\' && index+5 < len(variant.text) && variant.text[index+1] == 'u' && isHexDigit(variant.text[index+2]) && isHexDigit(variant.text[index+3]) && isHexDigit(variant.text[index+4]) && isHexDigit(variant.text[index+5]) {
 			if text[index] != '\\' || text[index+1] != 'u' || !sameHexDigit(text[index+2], variant.text[index+2]) || !sameHexDigit(text[index+3], variant.text[index+3]) || !sameHexDigit(text[index+4], variant.text[index+4]) || !sameHexDigit(text[index+5], variant.text[index+5]) {
-				return 0, false
+				return 0, false, false
 			}
 			index += 5
 			continue
 		}
 		if text[index] != variant.text[index] {
-			return 0, false
+			return 0, false, false
 		}
 	}
-	return len(variant.text), true
+	return len(variant.text), true, false
 }
 
-func encodedCredentialPrefix(text, variant string, allowPercentEncoding, allowUnicodeEncoding bool) (int, bool) {
+func encodedCredentialPrefixDetailed(text, variant string, allowPercentEncoding, allowUnicodeEncoding bool) (int, bool, bool) {
 	if variant == "" {
-		return 0, true
+		return 0, true, false
 	}
 	if len(text) > 0 && text[0] != '%' && text[0] != '\\' && text[0] != '+' && text[0] != variant[0] {
-		return 0, false
+		return 0, false, false
 	}
+	if len(text) >= len(variant) && strings.HasPrefix(text, variant) {
+		return len(variant), true, false
+	}
+	if !credentialLiteralCandidate(text, variant) {
+		return 0, false, false
+	}
+	exhausted := false
 	if allowUnicodeEncoding {
-		if consumed, ok := decodedCredentialPrefix(text, variant, allowPercentEncoding); ok {
-			return consumed, true
+		if consumed, ok, variantExhausted := decodedCredentialPrefixDetailed(text, variant, allowPercentEncoding); ok {
+			return consumed, true, false
+		} else {
+			exhausted = exhausted || variantExhausted
 		}
 	}
 	if allowPercentEncoding && allowUnicodeEncoding {
-		if consumed, ok := reverseDecodedCredentialPrefix(text, variant); ok {
-			return consumed, true
+		if consumed, ok, variantExhausted := reverseDecodedCredentialPrefixDetailed(text, variant); ok {
+			return consumed, true, false
+		} else {
+			exhausted = exhausted || variantExhausted
 		}
 	}
-	return literalCredentialPrefix(text, variant, allowPercentEncoding, allowUnicodeEncoding)
+	if consumed, ok, variantExhausted := literalCredentialPrefixDetailed(text, variant, allowPercentEncoding, allowUnicodeEncoding); ok {
+		return consumed, true, false
+	} else {
+		exhausted = exhausted || variantExhausted
+	}
+	return 0, false, exhausted
 }
 
-func literalCredentialPrefix(text, variant string, allowPercentEncoding, allowUnicodeEncoding bool) (int, bool) {
-	if allowPercentEncoding || allowUnicodeEncoding {
-		raw := rawCredentialPrefix(text, credentialRawByteLimit(len(variant)))
-		if consumed, ok := matchCredentialLayers(raw, variant, allowPercentEncoding, allowUnicodeEncoding, false); ok {
-			return consumed, true
-		}
-		if allowPercentEncoding && allowUnicodeEncoding {
-			if consumed, ok := matchCredentialLayers(raw, variant, true, true, true); ok {
-				return consumed, true
-			}
+func literalCredentialPrefixDetailed(text, variant string, allowPercentEncoding, allowUnicodeEncoding bool) (int, bool, bool) {
+	raw := rawCredentialPrefix(text, credentialRawByteLimit(len(variant)))
+	exhausted := false
+	if consumed, ok, variantExhausted := matchCredentialLayers(raw, variant, allowPercentEncoding, allowUnicodeEncoding, false); ok {
+		return consumed, true, false
+	} else {
+		exhausted = exhausted || variantExhausted
+	}
+	if allowPercentEncoding && allowUnicodeEncoding {
+		if consumed, ok, variantExhausted := matchCredentialLayers(raw, variant, true, true, true); ok {
+			return consumed, true, false
+		} else {
+			exhausted = exhausted || variantExhausted
 		}
 	}
-
-	textIndex := 0
-	for variantIndex := 0; variantIndex < len(variant); {
-		if textIndex >= len(text) {
-			return 0, false
-		}
-		if allowUnicodeEncoding {
-			if decoded, consumed, ok := decodeGoByteEscape(text[textIndex:]); ok {
-				if decoded != variant[variantIndex] {
-					return 0, false
-				}
-				textIndex += consumed
-				variantIndex++
-				continue
-			}
-		}
-		expected, size := utf8.DecodeRuneInString(variant[variantIndex:])
-		if size == 0 {
-			return 0, false
-		}
-		if allowUnicodeEncoding {
-			if decoded, consumed, ok := decodeEscapedRune(text[textIndex:]); ok && decoded == expected {
-				textIndex += consumed
-				variantIndex += size
-				continue
-			}
-		}
-		for byteIndex := 0; byteIndex < size; byteIndex++ {
-			if textIndex >= len(text) {
-				return 0, false
-			}
-			if allowPercentEncoding && text[textIndex] == '%' && textIndex+2 < len(text) && isHexDigit(text[textIndex+1]) && isHexDigit(text[textIndex+2]) {
-				if hexByte(text[textIndex+1], text[textIndex+2]) != variant[variantIndex+byteIndex] {
-					return 0, false
-				}
-				textIndex += 3
-				continue
-			}
-			if allowPercentEncoding && variant[variantIndex+byteIndex] == ' ' && text[textIndex] == '+' {
-				textIndex++
-				continue
-			}
-			if text[textIndex] != variant[variantIndex+byteIndex] {
-				return 0, false
-			}
-			textIndex++
-		}
-		variantIndex += size
-	}
-	return textIndex, true
+	return 0, false, exhausted
 }
 
 func decodeEscapedRune(text string) (rune, int, bool) {

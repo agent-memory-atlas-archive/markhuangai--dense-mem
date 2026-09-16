@@ -7,48 +7,48 @@ type credentialDecodedByte struct {
 	end   int
 }
 
-func decodedCredentialPrefix(text, variant string, allowPercentEncoding bool) (int, bool) {
+func decodedCredentialPrefixDetailed(text, variant string, allowPercentEncoding bool) (int, bool, bool) {
 	raw := rawCredentialPrefix(text, credentialRawByteLimit(len(variant)))
 	return matchCredentialLayers(raw, variant, allowPercentEncoding, true, false)
 }
 
-func reverseDecodedCredentialPrefix(text, variant string) (int, bool) {
+func reverseDecodedCredentialPrefixDetailed(text, variant string) (int, bool, bool) {
 	raw := rawCredentialPrefix(text, credentialRawByteLimit(len(variant)))
 	return matchCredentialLayers(raw, variant, true, true, true)
 }
 
 const maxCredentialDecodeLayers = 4
 
-func matchCredentialLayers(input []credentialDecodedByte, variant string, allowPercentEncoding, allowUnicodeEncoding, percentFirst bool) (int, bool) {
+func matchCredentialLayers(input []credentialDecodedByte, variant string, allowPercentEncoding, allowUnicodeEncoding, percentFirst bool) (int, bool, bool) {
 	decoded := input
 	for layer := 0; layer < maxCredentialDecodeLayers; layer++ {
 		if consumed, ok := matchDecodedCredentialPrefix(decoded, variant); ok {
-			return consumed, true
+			return consumed, true, false
 		}
 		before := decoded
 		if percentFirst && allowPercentEncoding {
 			decoded = decodeCredentialPercentLayer(decoded)
 			if consumed, ok := matchDecodedCredentialPrefix(decoded, variant); ok {
-				return consumed, true
+				return consumed, true, false
 			}
 		}
 		if allowUnicodeEncoding {
 			decoded = decodeCredentialEscapeLayer(decoded)
 			if consumed, ok := matchDecodedCredentialPrefix(decoded, variant); ok {
-				return consumed, true
+				return consumed, true, false
 			}
 		}
 		if !percentFirst && allowPercentEncoding {
 			decoded = decodeCredentialPercentLayer(decoded)
 			if consumed, ok := matchDecodedCredentialPrefix(decoded, variant); ok {
-				return consumed, true
+				return consumed, true, false
 			}
 		}
 		if credentialDecodedBytesEqual(before, decoded) {
-			break
+			return 0, false, false
 		}
 	}
-	return 0, false
+	return 0, false, true
 }
 
 func credentialDecodedBytesEqual(left, right []credentialDecodedByte) bool {
@@ -57,6 +57,28 @@ func credentialDecodedBytesEqual(left, right []credentialDecodedByte) bool {
 	}
 	for index := range left {
 		if left[index].value != right[index].value || left[index].end != right[index].end {
+			return false
+		}
+	}
+	return true
+}
+
+const credentialLiteralCandidateLimit = 64
+
+func credentialLiteralCandidate(text, variant string) bool {
+	limit := len(variant)
+	if limit > credentialLiteralCandidateLimit {
+		limit = credentialLiteralCandidateLimit
+	}
+	if limit > len(text) {
+		limit = len(text)
+	}
+	for index := 0; index < limit; index++ {
+		switch text[index] {
+		case '%', '\\', '+':
+			return true
+		}
+		if text[index] != variant[index] {
 			return false
 		}
 	}
@@ -164,4 +186,42 @@ func matchDecodedCredentialPrefix(decoded []credentialDecodedByte, variant strin
 		}
 	}
 	return decoded[len(variant)-1].end, true
+}
+
+func credentialTextContainsVariant(text string, variants []credentialVariant) bool {
+	contains, _ := credentialTextContainsVariantDetailed(text, variants)
+	return contains
+}
+
+func credentialTextContainsVariantDetailed(text string, variants []credentialVariant) (bool, bool) {
+	for index := 0; index < len(text); {
+		if _, _, ok, exhausted := credentialMatchAtDetailed(text[index:], variants); ok {
+			return true, false
+		} else if exhausted {
+			return false, true
+		}
+		_, size := utf8.DecodeRuneInString(text[index:])
+		if size == 0 {
+			return true, false
+		}
+		index += size
+	}
+	return false, false
+}
+
+func credentialMatchAt(text string, variants []credentialVariant) (credentialVariant, int, bool) {
+	variant, consumed, matched, _ := credentialMatchAtDetailed(text, variants)
+	return variant, consumed, matched
+}
+
+func credentialMatchAtDetailed(text string, variants []credentialVariant) (credentialVariant, int, bool, bool) {
+	exhausted := false
+	for _, variant := range variants {
+		consumed, ok, variantExhausted := credentialPrefixDetailed(text, variant)
+		if ok {
+			return variant, consumed, true, false
+		}
+		exhausted = exhausted || variantExhausted
+	}
+	return credentialVariant{}, 0, false, exhausted
 }
