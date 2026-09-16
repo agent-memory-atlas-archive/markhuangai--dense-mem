@@ -112,6 +112,10 @@ func TestCredentialProtectorMatchesMixedCasePercentEscapes(t *testing.T) {
 	require.Empty(t, got.UnavailableReason)
 	require.Equal(t, "credential="+CredentialProtectionRedacted, got.Value)
 
+	got = NewCredentialProtector("a b c").Snapshot("token=a+b%20c", 256)
+	require.Empty(t, got.UnavailableReason)
+	require.Equal(t, "token="+CredentialProtectionRedacted, got.Value)
+
 	literal := NewCredentialProtector("foo%2F").Snapshot("foo%2f", 64)
 	require.Empty(t, literal.UnavailableReason)
 	require.Equal(t, "foo%2f", literal.Value)
@@ -122,9 +126,49 @@ func TestCredentialProtectorMatchesMixedCaseJSONUnicodeEscapes(t *testing.T) {
 	require.Empty(t, got.UnavailableReason)
 	require.Equal(t, `{"password":"`+CredentialProtectionRedacted+`"}`, got.Value)
 
+	got = NewCredentialProtector("secret-key").Snapshot(`{"password":"\u0073ecret-key"}`, 256)
+	require.Empty(t, got.UnavailableReason)
+	require.Equal(t, `{"password":"`+CredentialProtectionRedacted+`"}`, got.Value)
+
 	jsonValue := NewCredentialProtector("abc").Snapshot([]byte(`{"password":"%61bc"}`), 256)
 	require.Empty(t, jsonValue.UnavailableReason)
 	require.Equal(t, map[string]any{"password": CredentialProtectionRedacted}, jsonValue.Value)
+}
+
+func TestCredentialProtectorMatchesSurrogateUnicodeEscapes(t *testing.T) {
+	tests := []struct {
+		name   string
+		secret string
+		input  string
+	}{
+		{name: "surrogate pair", secret: "😀", input: `{"password":"\uD83D\uDE00"}`},
+		{name: "unpaired high surrogate", secret: "�", input: `{"password":"\uD800"}`},
+		{name: "unpaired low surrogate", secret: "�", input: `{"password":"\uDC00"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := NewCredentialProtector(test.secret).Snapshot(test.input, 256)
+			require.Empty(t, got.UnavailableReason)
+			require.Equal(t, `{"password":"`+CredentialProtectionRedacted+`"}`, got.Value)
+		})
+	}
+}
+
+func TestCredentialProtectorFailsClosedWhenMarkerContainsCredential(t *testing.T) {
+	got := NewCredentialProtector("REDACTED").Snapshot("token=REDACTED", 256)
+	require.Equal(t, CredentialProtectionFormattingFailed, got.UnavailableReason)
+	require.Nil(t, got.Value)
+}
+
+func TestCredentialProtectorHandlesNilAndEmptyConfiguration(t *testing.T) {
+	var nilProtector *CredentialProtector
+	got := nilProtector.Snapshot("safe", 256)
+	require.Empty(t, got.UnavailableReason)
+	require.Equal(t, "safe", got.Value)
+
+	got = NewCredentialProtector("").Snapshot("safe", 256)
+	require.Empty(t, got.UnavailableReason)
+	require.Equal(t, "safe", got.Value)
 }
 
 func TestCredentialProtectorRejectsUnsafeValuesWithoutRawFallback(t *testing.T) {

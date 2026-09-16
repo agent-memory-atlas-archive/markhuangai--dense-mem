@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -73,6 +74,9 @@ func (p *CredentialProtector) Snapshot(value any, maxBytes int, authenticatedSec
 		variants = append(variants, p.variants...)
 	}
 	variants = mergeCredentialVariants(variants, credentialVariants(authenticatedSecrets))
+	if credentialMarkerCollides(variants) {
+		return unavailableDiagnostic(CredentialProtectionFormattingFailed)
+	}
 	budget := &credentialSnapshotBudget{limit: maxBytes}
 	walker := credentialSnapshotWalker{
 		variants: variants,
@@ -466,30 +470,31 @@ type credentialVariant struct {
 	foldPercentEscapes   bool
 	foldUnicodeEscapes   bool
 	allowPercentEncoding bool
+	allowUnicodeEncoding bool
 }
 
 func credentialVariants(secrets []string) []credentialVariant {
 	variants := make([]credentialVariant, 0, len(secrets)*7)
 	seen := make(map[credentialVariant]struct{}, len(secrets)*7)
 	for _, secret := range secrets {
-		addCredentialVariant(seen, &variants, secret, false, false, true)
+		addCredentialVariant(seen, &variants, secret, false, false, true, true)
 		if secret == "" {
 			continue
 		}
 		if encoded, err := json.Marshal(secret); err == nil && len(encoded) >= 2 {
-			addCredentialVariant(seen, &variants, string(encoded[1:len(encoded)-1]), false, true, false)
+			addCredentialVariant(seen, &variants, string(encoded[1:len(encoded)-1]), false, true, false, false)
 		}
 		quoted := strconv.Quote(secret)
 		if len(quoted) >= 2 {
-			addCredentialVariant(seen, &variants, quoted[1:len(quoted)-1], false, true, false)
+			addCredentialVariant(seen, &variants, quoted[1:len(quoted)-1], false, true, false, false)
 		}
 		quotedASCII := strconv.QuoteToASCII(secret)
 		if len(quotedASCII) >= 2 {
-			addCredentialVariant(seen, &variants, quotedASCII[1:len(quotedASCII)-1], false, true, false)
+			addCredentialVariant(seen, &variants, quotedASCII[1:len(quotedASCII)-1], false, true, false, false)
 		}
 		for _, encoded := range []string{url.QueryEscape(secret), url.PathEscape(secret), userInfoEscape(secret)} {
-			addCredentialVariant(seen, &variants, encoded, true, false, false)
-			addCredentialVariant(seen, &variants, lowerPercentEscapes(encoded), true, false, false)
+			addCredentialVariant(seen, &variants, encoded, true, false, false, false)
+			addCredentialVariant(seen, &variants, lowerPercentEscapes(encoded), true, false, false, false)
 		}
 	}
 	sort.Slice(variants, func(left, right int) bool {
@@ -504,6 +509,9 @@ func credentialVariants(secrets []string) []credentialVariant {
 		}
 		if variants[left].foldUnicodeEscapes != variants[right].foldUnicodeEscapes {
 			return variants[left].foldUnicodeEscapes
+		}
+		if variants[left].allowUnicodeEncoding != variants[right].allowUnicodeEncoding {
+			return variants[left].allowUnicodeEncoding
 		}
 		return !variants[left].foldPercentEscapes && variants[right].foldPercentEscapes
 	})
@@ -539,12 +547,15 @@ func mergeCredentialVariants(existing, additional []credentialVariant) []credent
 		if merged[left].foldUnicodeEscapes != merged[right].foldUnicodeEscapes {
 			return merged[left].foldUnicodeEscapes
 		}
+		if merged[left].allowUnicodeEncoding != merged[right].allowUnicodeEncoding {
+			return merged[left].allowUnicodeEncoding
+		}
 		return !merged[left].foldPercentEscapes && merged[right].foldPercentEscapes
 	})
 	return merged
 }
 
-func addCredentialVariant(seen map[credentialVariant]struct{}, variants *[]credentialVariant, text string, foldPercentEscapes, foldUnicodeEscapes, allowPercentEncoding bool) {
+func addCredentialVariant(seen map[credentialVariant]struct{}, variants *[]credentialVariant, text string, foldPercentEscapes, foldUnicodeEscapes, allowPercentEncoding, allowUnicodeEncoding bool) {
 	if text == "" {
 		return
 	}
@@ -553,12 +564,22 @@ func addCredentialVariant(seen map[credentialVariant]struct{}, variants *[]crede
 		foldPercentEscapes:   foldPercentEscapes,
 		foldUnicodeEscapes:   foldUnicodeEscapes,
 		allowPercentEncoding: allowPercentEncoding,
+		allowUnicodeEncoding: allowUnicodeEncoding,
 	}
 	if _, exists := seen[variant]; exists {
 		return
 	}
 	seen[variant] = struct{}{}
 	*variants = append(*variants, variant)
+}
+
+func credentialMarkerCollides(variants []credentialVariant) bool {
+	for index := 0; index < len(CredentialProtectionRedacted); index++ {
+		if _, _, ok := credentialMatchAt(CredentialProtectionRedacted[index:], variants); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func userInfoEscape(secret string) string {
@@ -674,7 +695,10 @@ func credentialMatchAt(text string, variants []credentialVariant) (credentialVar
 
 func credentialPrefix(text string, variant credentialVariant) (int, bool) {
 	if variant.allowPercentEncoding {
-		return percentEncodedPrefix(text, variant.text)
+		return encodedCredentialPrefix(text, variant.text, true, variant.allowUnicodeEncoding)
+	}
+	if variant.allowUnicodeEncoding {
+		return encodedCredentialPrefix(text, variant.text, false, true)
 	}
 	if len(variant.text) > len(text) {
 		return 0, false
@@ -707,25 +731,66 @@ func credentialPrefix(text string, variant credentialVariant) (int, bool) {
 	return len(variant.text), true
 }
 
-func percentEncodedPrefix(text, variant string) (int, bool) {
+func encodedCredentialPrefix(text, variant string, allowPercentEncoding, allowUnicodeEncoding bool) (int, bool) {
 	textIndex := 0
-	for variantIndex := 0; variantIndex < len(variant); variantIndex++ {
+	for variantIndex := 0; variantIndex < len(variant); {
 		if textIndex >= len(text) {
 			return 0, false
 		}
-		if text[textIndex] == '%' && textIndex+2 < len(text) && isHexDigit(text[textIndex+1]) && isHexDigit(text[textIndex+2]) {
-			if hexByte(text[textIndex+1], text[textIndex+2]) != variant[variantIndex] {
-				return 0, false
-			}
-			textIndex += 3
-			continue
-		}
-		if text[textIndex] != variant[variantIndex] {
+		expected, size := utf8.DecodeRuneInString(variant[variantIndex:])
+		if size == 0 {
 			return 0, false
 		}
-		textIndex++
+		if allowUnicodeEncoding {
+			if decoded, consumed, ok := decodeUnicodeEscape(text[textIndex:]); ok && decoded == expected {
+				textIndex += consumed
+				variantIndex += size
+				continue
+			}
+		}
+		for byteIndex := 0; byteIndex < size; byteIndex++ {
+			if textIndex >= len(text) {
+				return 0, false
+			}
+			if allowPercentEncoding && text[textIndex] == '%' && textIndex+2 < len(text) && isHexDigit(text[textIndex+1]) && isHexDigit(text[textIndex+2]) {
+				if hexByte(text[textIndex+1], text[textIndex+2]) != variant[variantIndex+byteIndex] {
+					return 0, false
+				}
+				textIndex += 3
+				continue
+			}
+			if allowPercentEncoding && variant[variantIndex+byteIndex] == ' ' && text[textIndex] == '+' {
+				textIndex++
+				continue
+			}
+			if text[textIndex] != variant[variantIndex+byteIndex] {
+				return 0, false
+			}
+			textIndex++
+		}
+		variantIndex += size
 	}
 	return textIndex, true
+}
+
+func decodeUnicodeEscape(text string) (rune, int, bool) {
+	if len(text) < 6 || text[0] != '\\' || text[1] != 'u' || !isHexDigit(text[2]) || !isHexDigit(text[3]) || !isHexDigit(text[4]) || !isHexDigit(text[5]) {
+		return 0, 0, false
+	}
+	code := rune(hexDigit(text[2]))<<12 | rune(hexDigit(text[3]))<<8 | rune(hexDigit(text[4]))<<4 | rune(hexDigit(text[5]))
+	if code >= 0xD800 && code <= 0xDBFF {
+		if len(text) >= 12 && text[6] == '\\' && text[7] == 'u' && isHexDigit(text[8]) && isHexDigit(text[9]) && isHexDigit(text[10]) && isHexDigit(text[11]) {
+			low := rune(hexDigit(text[8]))<<12 | rune(hexDigit(text[9]))<<8 | rune(hexDigit(text[10]))<<4 | rune(hexDigit(text[11]))
+			if low >= 0xDC00 && low <= 0xDFFF {
+				return utf16.DecodeRune(code, low), 12, true
+			}
+		}
+		return utf8.RuneError, 6, true
+	}
+	if code >= 0xDC00 && code <= 0xDFFF {
+		return utf8.RuneError, 6, true
+	}
+	return code, 6, true
 }
 
 func isHexDigit(value byte) bool {
