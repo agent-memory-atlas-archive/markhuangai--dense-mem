@@ -135,6 +135,18 @@ func TestCredentialProtectorMatchesMixedCaseJSONUnicodeEscapes(t *testing.T) {
 	require.Equal(t, map[string]any{"password": CredentialProtectionRedacted}, jsonValue.Value)
 }
 
+func TestCredentialProtectorMatchesComposedJSONAndPercentEncoding(t *testing.T) {
+	input := `{"url":"?token=\u002561"}`
+
+	got := NewCredentialProtector("a").Snapshot(input, 256)
+	require.Empty(t, got.UnavailableReason)
+	require.Equal(t, `{"url":"?token=`+CredentialProtectionRedacted+`"}`, got.Value)
+
+	got = NewCredentialProtector("a").Snapshot([]byte(input), 256)
+	require.Empty(t, got.UnavailableReason)
+	require.Equal(t, map[string]any{"url": "?token=" + CredentialProtectionRedacted}, got.Value)
+}
+
 func TestCredentialProtectorMatchesSurrogateUnicodeEscapes(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -336,11 +348,20 @@ func TestCredentialProtectorRejectsUnsafeValuesWithoutRawFallback(t *testing.T) 
 
 func TestCredentialProtectorRejectsExcessiveDepth(t *testing.T) {
 	var value any = "leaf"
-	for index := 0; index < MaxCredentialProtectionDepth+1; index++ {
+	for index := 0; index < MaxCredentialProtectionDepth; index++ {
 		value = map[string]any{"next": value}
 	}
 
 	got := NewCredentialProtector("leaf").Snapshot(value, 1<<20)
+	require.Empty(t, got.UnavailableReason)
+	require.NotNil(t, got.Value)
+
+	value = "leaf"
+	for index := 0; index < MaxCredentialProtectionDepth+1; index++ {
+		value = map[string]any{"next": value}
+	}
+
+	got = NewCredentialProtector("leaf").Snapshot(value, 1<<20)
 	require.Equal(t, CredentialProtectionDepthExceeded, got.UnavailableReason)
 	require.Nil(t, got.Value)
 
@@ -442,6 +463,25 @@ func TestCredentialProtectorPreservesLosslessJSONNumbers(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, input, string(encoded))
 	}
+}
+
+func TestCredentialProtectorRejectsInvalidJSONNumbers(t *testing.T) {
+	got := NewCredentialProtector("secret").Snapshot(json.Number("not-a-number"), 128)
+	require.Equal(t, CredentialProtectionFormattingFailed, got.UnavailableReason)
+	require.Nil(t, got.Value)
+}
+
+func TestCredentialProtectorBoundsRedactionExpansion(t *testing.T) {
+	encoded, err := json.Marshal(CredentialProtectionRedacted)
+	require.NoError(t, err)
+
+	got := NewCredentialProtector("secret").Snapshot("secret", len(encoded))
+	require.Empty(t, got.UnavailableReason)
+	require.Equal(t, CredentialProtectionRedacted, got.Value)
+
+	got = NewCredentialProtector("secret").Snapshot("secret", len(encoded)-1)
+	require.Equal(t, CredentialProtectionBudgetExceeded, got.UnavailableReason)
+	require.Nil(t, got.Value)
 }
 
 type panicDiagnosticError struct{}
