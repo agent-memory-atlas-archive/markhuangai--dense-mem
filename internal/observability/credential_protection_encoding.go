@@ -9,18 +9,48 @@ type credentialDecodedByte struct {
 
 func decodedCredentialPrefix(text, variant string, allowPercentEncoding bool) (int, bool) {
 	raw := rawCredentialPrefix(text, credentialRawByteLimit(len(variant)))
-	decoded := decodeCredentialEscapeLayer(raw)
-	if allowPercentEncoding {
-		decoded = decodeCredentialPercentLayer(decoded)
-	}
+	decoded := decodeCredentialLayers(raw, allowPercentEncoding, true, false)
 	return matchDecodedCredentialPrefix(decoded, variant)
 }
 
 func reverseDecodedCredentialPrefix(text, variant string) (int, bool) {
 	raw := rawCredentialPrefix(text, credentialRawByteLimit(len(variant)))
-	decoded := decodeCredentialPercentLayer(raw)
-	decoded = decodeCredentialEscapeLayer(decoded)
+	decoded := decodeCredentialLayers(raw, true, true, true)
 	return matchDecodedCredentialPrefix(decoded, variant)
+}
+
+const maxCredentialDecodeLayers = 4
+
+func decodeCredentialLayers(input []credentialDecodedByte, allowPercentEncoding, allowUnicodeEncoding, percentFirst bool) []credentialDecodedByte {
+	decoded := input
+	for layer := 0; layer < maxCredentialDecodeLayers; layer++ {
+		before := decoded
+		if percentFirst && allowPercentEncoding {
+			decoded = decodeCredentialPercentLayer(decoded)
+		}
+		if allowUnicodeEncoding {
+			decoded = decodeCredentialEscapeLayer(decoded)
+		}
+		if !percentFirst && allowPercentEncoding {
+			decoded = decodeCredentialPercentLayer(decoded)
+		}
+		if credentialDecodedBytesEqual(before, decoded) {
+			break
+		}
+	}
+	return decoded
+}
+
+func credentialDecodedBytesEqual(left, right []credentialDecodedByte) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].value != right[index].value || left[index].end != right[index].end {
+			return false
+		}
+	}
+	return true
 }
 
 func credentialRawByteLimit(variantLength int) int {

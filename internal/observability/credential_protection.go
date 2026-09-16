@@ -22,13 +22,14 @@ const (
 	// credential in an otherwise available diagnostic value.
 	CredentialProtectionRedacted = "[REDACTED]"
 
-	CredentialProtectionInvalidBudget    = "invalid_max_bytes"
-	CredentialProtectionBudgetExceeded   = "max_bytes_exceeded"
-	CredentialProtectionDepthExceeded    = "max_depth_exceeded"
-	CredentialProtectionCycleDetected    = "cycle_detected"
-	CredentialProtectionUnsupported      = "unsupported_value"
-	CredentialProtectionInvalidEncoding  = "invalid_encoding"
-	CredentialProtectionFormattingFailed = "formatting_failed"
+	CredentialProtectionInvalidBudget      = "invalid_max_bytes"
+	CredentialProtectionBudgetExceeded     = "max_bytes_exceeded"
+	CredentialProtectionDepthExceeded      = "max_depth_exceeded"
+	CredentialProtectionCycleDetected      = "cycle_detected"
+	CredentialProtectionUnsupported        = "unsupported_value"
+	CredentialProtectionInvalidEncoding    = "invalid_encoding"
+	CredentialProtectionFormattingFailed   = "formatting_failed"
+	credentialProtectionGenericUnavailable = "diagnostic_unavailable"
 )
 
 // ProtectedDiagnostic is a detached operator-facing representation. An empty
@@ -58,24 +59,23 @@ func NewCredentialProtector(configuredSecrets ...string) *CredentialProtector {
 // mutating the protector. Unsupported, cyclic, invalid, or over-budget values
 // return a bounded reason and never return a raw or partial Value.
 func (p *CredentialProtector) Snapshot(value any, maxBytes int, authenticatedSecrets ...string) (result ProtectedDiagnostic) {
+	var variants []credentialVariant
 	result = ProtectedDiagnostic{Value: nil}
 	defer func() {
 		if recover() != nil {
-			result = unavailableDiagnostic(CredentialProtectionFormattingFailed)
+			result = unavailableDiagnostic(CredentialProtectionFormattingFailed, variants)
 		}
 	}()
-
-	if maxBytes <= 0 {
-		return unavailableDiagnostic(CredentialProtectionInvalidBudget)
-	}
-
-	variants := make([]credentialVariant, 0)
 	if p != nil {
 		variants = append(variants, p.variants...)
 	}
 	variants = mergeCredentialVariants(variants, credentialVariants(authenticatedSecrets))
+
+	if maxBytes <= 0 {
+		return unavailableDiagnostic(CredentialProtectionInvalidBudget, variants)
+	}
 	if credentialMarkerCollides(variants) {
-		return unavailableDiagnostic(CredentialProtectionFormattingFailed)
+		return unavailableDiagnostic(CredentialProtectionFormattingFailed, variants)
 	}
 	budget := &credentialSnapshotBudget{limit: maxBytes}
 	walker := credentialSnapshotWalker{
@@ -84,26 +84,41 @@ func (p *CredentialProtector) Snapshot(value any, maxBytes int, authenticatedSec
 	}
 	snapshot, reason := walker.walk(reflect.ValueOf(value), 0, budget)
 	if reason != "" {
-		return unavailableDiagnostic(reason)
+		return unavailableDiagnostic(reason, variants)
 	}
 	if budget.encoded > maxBytes {
-		return unavailableDiagnostic(CredentialProtectionBudgetExceeded)
+		return unavailableDiagnostic(CredentialProtectionBudgetExceeded, variants)
 	}
 	encoded, err := json.Marshal(snapshot)
 	if err != nil {
-		return unavailableDiagnostic(CredentialProtectionFormattingFailed)
+		return unavailableDiagnostic(CredentialProtectionFormattingFailed, variants)
 	}
 	if len(encoded) > maxBytes {
-		return unavailableDiagnostic(CredentialProtectionBudgetExceeded)
+		return unavailableDiagnostic(CredentialProtectionBudgetExceeded, variants)
 	}
 	if credentialTextContainsVariant(string(encoded), variants) {
-		return unavailableDiagnostic(CredentialProtectionFormattingFailed)
+		return unavailableDiagnostic(CredentialProtectionFormattingFailed, variants)
 	}
 	return ProtectedDiagnostic{Value: snapshot}
 }
 
-func unavailableDiagnostic(reason string) ProtectedDiagnostic {
-	return ProtectedDiagnostic{UnavailableReason: reason}
+func unavailableDiagnostic(reason string, variants []credentialVariant) ProtectedDiagnostic {
+	if reason == "" || !credentialTextContainsVariant(reason, variants) {
+		return ProtectedDiagnostic{UnavailableReason: reason}
+	}
+	if !credentialTextContainsVariant(credentialProtectionGenericUnavailable, variants) {
+		return ProtectedDiagnostic{UnavailableReason: credentialProtectionGenericUnavailable}
+	}
+	for candidate := rune(0xE000); candidate <= utf8.MaxRune; candidate++ {
+		if candidate >= 0xD800 && candidate <= 0xDFFF {
+			continue
+		}
+		text := string(candidate)
+		if !credentialTextContainsVariant(text, variants) {
+			return ProtectedDiagnostic{UnavailableReason: text}
+		}
+	}
+	return ProtectedDiagnostic{UnavailableReason: credentialProtectionGenericUnavailable}
 }
 
 type credentialSnapshotVisit struct {
@@ -769,6 +784,20 @@ func encodedCredentialPrefix(text, variant string, allowPercentEncoding, allowUn
 }
 
 func literalCredentialPrefix(text, variant string, allowPercentEncoding, allowUnicodeEncoding bool) (int, bool) {
+	if allowPercentEncoding || allowUnicodeEncoding {
+		raw := rawCredentialPrefix(text, credentialRawByteLimit(len(variant)))
+		decoded := decodeCredentialLayers(raw, allowPercentEncoding, allowUnicodeEncoding, false)
+		if consumed, ok := matchDecodedCredentialPrefix(decoded, variant); ok {
+			return consumed, true
+		}
+		if allowPercentEncoding && allowUnicodeEncoding {
+			decoded = decodeCredentialLayers(raw, true, true, true)
+			if consumed, ok := matchDecodedCredentialPrefix(decoded, variant); ok {
+				return consumed, true
+			}
+		}
+	}
+
 	textIndex := 0
 	for variantIndex := 0; variantIndex < len(variant); {
 		if textIndex >= len(text) {

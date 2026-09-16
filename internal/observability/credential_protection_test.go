@@ -152,6 +152,27 @@ func TestCredentialProtectorMatchesComposedJSONAndPercentEncoding(t *testing.T) 
 	require.Equal(t, `https://e.test/?payload=%7B%22password%22%3A%22`+CredentialProtectionRedacted+`%22%7D`, got.Value)
 }
 
+func TestCredentialProtectorMatchesRepeatedEncodingLayers(t *testing.T) {
+	tests := []struct {
+		name   string
+		secret string
+		input  string
+		expect string
+	}{
+		{name: "repeated percent encoding", secret: "a", input: "token=%2561", expect: "token=" + CredentialProtectionRedacted},
+		{name: "repeated unicode escaping", secret: "a", input: `token=\u005Cu0061`, expect: "token=" + CredentialProtectionRedacted},
+		{name: "repeated percent encoding of slash", secret: "secret/key", input: "url=secret%252Fkey", expect: "url=" + CredentialProtectionRedacted},
+		{name: "repeated unicode escaping of prefix", secret: "secret-key", input: `token=\u005Cu0073ecret-key`, expect: "token=" + CredentialProtectionRedacted},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := NewCredentialProtector(test.secret).Snapshot(test.input, 256)
+			require.Empty(t, got.UnavailableReason)
+			require.Equal(t, test.expect, got.Value)
+		})
+	}
+}
+
 func TestCredentialProtectorMatchesSurrogateUnicodeEscapes(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -496,5 +517,13 @@ func (panicDiagnosticError) Error() string { panic("diagnostic formatting failed
 func TestCredentialProtectorConvertsFormattingPanicsToBoundedFailure(t *testing.T) {
 	got := NewCredentialProtector("secret").Snapshot(panicDiagnosticError{}, 256)
 	require.Equal(t, CredentialProtectionFormattingFailed, got.UnavailableReason)
+	require.Nil(t, got.Value)
+
+	got = NewCredentialProtector("formatting_failed").Snapshot(panicDiagnosticError{}, 256)
+	require.Equal(t, credentialProtectionGenericUnavailable, got.UnavailableReason)
+	require.Nil(t, got.Value)
+
+	got = NewCredentialProtector("_").Snapshot("safe", 0)
+	require.Equal(t, string(rune(0xE000)), got.UnavailableReason)
 	require.Nil(t, got.Value)
 }
