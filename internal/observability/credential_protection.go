@@ -265,6 +265,9 @@ func (w *credentialSnapshotWalker) protectText(text string, budget *credentialSn
 	if !ok {
 		return "", CredentialProtectionBudgetExceeded
 	}
+	if credentialTextContainsVariant(protected, w.variants) {
+		return "", CredentialProtectionFormattingFailed
+	}
 	return protected, ""
 }
 
@@ -684,6 +687,20 @@ func redactCredentialTextBounded(text string, variants []credentialVariant, maxO
 	return string(output), true
 }
 
+func credentialTextContainsVariant(text string, variants []credentialVariant) bool {
+	for index := 0; index < len(text); {
+		if _, _, ok := credentialMatchAt(text[index:], variants); ok {
+			return true
+		}
+		_, size := utf8.DecodeRuneInString(text[index:])
+		if size == 0 {
+			return true
+		}
+		index += size
+	}
+	return false
+}
+
 func credentialMatchAt(text string, variants []credentialVariant) (credentialVariant, int, bool) {
 	for _, variant := range variants {
 		if consumed, ok := credentialPrefix(text, variant); ok {
@@ -742,7 +759,7 @@ func encodedCredentialPrefix(text, variant string, allowPercentEncoding, allowUn
 			return 0, false
 		}
 		if allowUnicodeEncoding {
-			if decoded, consumed, ok := decodeUnicodeEscape(text[textIndex:]); ok && decoded == expected {
+			if decoded, consumed, ok := decodeJSONEscape(text[textIndex:]); ok && decoded == expected {
 				textIndex += consumed
 				variantIndex += size
 				continue
@@ -773,8 +790,28 @@ func encodedCredentialPrefix(text, variant string, allowPercentEncoding, allowUn
 	return textIndex, true
 }
 
-func decodeUnicodeEscape(text string) (rune, int, bool) {
-	if len(text) < 6 || text[0] != '\\' || text[1] != 'u' || !isHexDigit(text[2]) || !isHexDigit(text[3]) || !isHexDigit(text[4]) || !isHexDigit(text[5]) {
+func decodeJSONEscape(text string) (rune, int, bool) {
+	if len(text) < 2 || text[0] != '\\' {
+		return 0, 0, false
+	}
+	switch text[1] {
+	case '"', '\\', '/':
+		return rune(text[1]), 2, true
+	case 'b':
+		return '\b', 2, true
+	case 'f':
+		return '\f', 2, true
+	case 'n':
+		return '\n', 2, true
+	case 'r':
+		return '\r', 2, true
+	case 't':
+		return '\t', 2, true
+	case 'u':
+		if len(text) < 6 || !isHexDigit(text[2]) || !isHexDigit(text[3]) || !isHexDigit(text[4]) || !isHexDigit(text[5]) {
+			return 0, 0, false
+		}
+	default:
 		return 0, 0, false
 	}
 	code := rune(hexDigit(text[2]))<<12 | rune(hexDigit(text[3]))<<8 | rune(hexDigit(text[4]))<<4 | rune(hexDigit(text[5]))

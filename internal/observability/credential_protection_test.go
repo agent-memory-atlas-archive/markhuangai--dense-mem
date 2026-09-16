@@ -154,8 +154,60 @@ func TestCredentialProtectorMatchesSurrogateUnicodeEscapes(t *testing.T) {
 	}
 }
 
+func TestCredentialProtectorMatchesJSONShortEscapes(t *testing.T) {
+	tests := []struct {
+		name   string
+		secret string
+		input  string
+	}{
+		{name: "quote", secret: `a"b`, input: `{"password":"a\"b"}`},
+		{name: "backslash", secret: `a\b`, input: `{"password":"a\\b"}`},
+		{name: "solidus", secret: "a/b", input: `{"password":"a\/b"}`},
+		{name: "backspace", secret: "a\bb", input: `{"password":"a\bb"}`},
+		{name: "form feed", secret: "a\fb", input: `{"password":"a\fb"}`},
+		{name: "line feed", secret: "a\nb", input: `{"password":"a\nb"}`},
+		{name: "carriage return", secret: "a\rb", input: `{"password":"a\rb"}`},
+		{name: "tab", secret: "a\tb", input: `{"password":"a\tb"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := NewCredentialProtector(test.secret).Snapshot(test.input, 256)
+			require.Empty(t, got.UnavailableReason)
+			require.Equal(t, `{"password":"`+CredentialProtectionRedacted+`"}`, got.Value)
+		})
+	}
+}
+
 func TestCredentialProtectorFailsClosedWhenMarkerContainsCredential(t *testing.T) {
-	got := NewCredentialProtector("REDACTED").Snapshot("token=REDACTED", 256)
+	tests := []string{"REDACTED", "DACT"}
+	for _, secret := range tests {
+		got := NewCredentialProtector(secret).Snapshot("token="+secret, 256)
+		require.Equal(t, CredentialProtectionFormattingFailed, got.UnavailableReason)
+		require.Nil(t, got.Value)
+	}
+
+	for _, test := range []struct {
+		secret string
+		input  string
+	}{
+		{secret: "]x", input: "]xx"},
+		{secret: "x[", input: "xx["},
+	} {
+		got := NewCredentialProtector(test.secret).Snapshot(test.input, 256)
+		require.Equal(t, CredentialProtectionFormattingFailed, got.UnavailableReason)
+		require.Nil(t, got.Value)
+	}
+}
+
+func TestCredentialProtectorProtectsMapKeysAndRejectsRedactionCollisions(t *testing.T) {
+	got := NewCredentialProtector("credential").Snapshot(map[string]any{"credential": "safe"}, 256)
+	require.Empty(t, got.UnavailableReason)
+	require.Equal(t, map[string]any{CredentialProtectionRedacted: "safe"}, got.Value)
+
+	got = NewCredentialProtector("credential").Snapshot(map[string]any{
+		"credential":                 "first",
+		CredentialProtectionRedacted: "second",
+	}, 256)
 	require.Equal(t, CredentialProtectionFormattingFailed, got.UnavailableReason)
 	require.Nil(t, got.Value)
 }
