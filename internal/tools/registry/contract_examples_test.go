@@ -199,7 +199,17 @@ func TestCorrectionContinuationMapsReturnedCandidateEndpoints(t *testing.T) {
 
 func TestContractToolExamplesDescribeBoundedRecovery(t *testing.T) {
 	feedback := contractToolDescription(ToolSubmitRecallSessionFeedback)
-	for _, want := range []string{"failed_index", "next_action", "remediation", "correct_and_resubmit", "retry_same_request", "stop"} {
+	for _, want := range []string{
+		"failed_index",
+		"Items before failed_index were recorded; omit them",
+		"correct the failed item and submit it with all later unprocessed items",
+		"resend the failed item and all later unprocessed items unchanged",
+		"next_action",
+		"remediation",
+		"correct_and_resubmit",
+		"retry_same_request",
+		"stop",
+	} {
 		if !strings.Contains(feedback, want) {
 			t.Fatalf("feedback guidance missing %q", want)
 		}

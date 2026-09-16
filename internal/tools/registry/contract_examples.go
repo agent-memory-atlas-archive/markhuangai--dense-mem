@@ -176,7 +176,7 @@ func contractToolExamples() map[string]contractToolExample {
 				}},
 			},
 			Result:     "The result reports recorded and recorded_count, or a bounded partial failure with the failed index and remediation.",
-			NextAction: "For a partial failure, use failed_index with the returned next_action and remediation: correct only that item for correct_and_resubmit, resend unchanged items for retry_same_request, and stop only when instructed. Do not invent feedback for a recall you did not use.",
+			NextAction: "For a partial failure, use failed_index with the returned next_action and remediation. Items before failed_index were recorded; omit them. For correct_and_resubmit, correct the failed item and submit it with all later unprocessed items. For retry_same_request, resend the failed item and all later unprocessed items unchanged; stop only when instructed. Do not invent feedback for a recall you did not use.",
 		},
 		ToolListDreams: {
 			WhenToUse:     "List reviewable Hypotheses without treating them as accepted memory.",
