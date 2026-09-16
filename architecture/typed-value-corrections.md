@@ -1,0 +1,279 @@
+# Typed-Value Relationship corrections
+
+Status: design report for [issue #429](https://github.com/markhuangai/dense-mem/issues/429).
+This document records the current supported workflow and a bounded recommendation.
+It does not change a runtime contract, schema, migration, or accepted ADR.
+
+## Report provenance
+
+- Audit source: freshly fetched `origin/main` at
+  `d993e24905253b4694a4bf4375a1241c2b36e145`.
+- Report branch and HEAD at inspection: `docs/429-typed-value-corrections` at
+  `d993e24905253b4694a4bf4375a1241c2b36e145`.
+- Execution checkout: `/tmp/dense-mem-429-typed-value-design`.
+- Before the report was written, the source checkout and task checkout were
+  clean, protected Git configuration was recorded without exposing values, and
+  no workflow test artifacts existed. Other registered worktrees and their
+  pre-existing state were preserved.
+- All source and test references below are against that commit. Test results
+  are recorded by the implementation workflow after the independent plan audit;
+  this report does not claim that unrun checks passed.
+
+## Recommendation
+
+Use the workflow that matches what was wrong in the original observation:
+
+1. For a mis-extracted Entity or predicate, use `correct_relationship` with the
+   original Relationship version and its complete effective support set. The
+   tool atomically supersedes the caller-owned Relationship and records the
+   successor's provenance.
+2. For a fact that has changed in the world, submit a new `remember` request
+   with fresh evidence. Do not use `correction_target` to reuse old evidence
+   for a new value.
+3. For a mis-extracted typed Value, the current public contract has no complete
+   atomic replacement workflow. `remember.correction_target` can associate a
+   newly accepted Relationship with an older one, but it does not transition
+   the older Relationship out of `active`. `correct_relationship` cannot patch
+   an object Value, unit, type, or validity window. Clients must not describe
+   either path as a completed typed-Value correction until a follow-up
+   implementation adds that capability.
+
+This is the smallest sufficient current guidance. A pair of separate calls
+that retracts or replaces one item and then writes another would leave a window
+of inconsistent active state and would not preserve one atomic correction
+operation.
+
+## Actual paths
+
+The two candidate workflows have different owners and state transitions:
+
+```text
+remember
+  MCP registry and schema
+    -> Remember application service (authenticated actor, security scan, hash)
+    -> synchronous assessment (complete provider response and typed-value checks)
+    -> PostgreSQL Remember commit transaction
+       evidence, observations, Relationship, support, search documents
+       optional correction_target cross-reference
+
+correct_relationship
+  MCP registry and schema
+    -> lifecycle application service (authenticated owner)
+    -> read-only correction and embedding plan
+    -> provider embedding execution outside the transaction
+    -> PostgreSQL correction transaction
+       version/support/space fences, successor, supersession,
+       cross-reference, correction event, search documents, receipt
+```
+
+The registry binds `remember` and `correct_relationship` to separate
+application services (`internal/tools/registry/remember_bindings.go:12-53` and
+`internal/tools/registry/lifecycle_bindings.go:31-60`). Both services derive
+team and owner from the authenticated request context; the request body cannot
+select a different tenant (`internal/remember/service/service.go:173-205` and
+`internal/lifecycle/service.go:122-149`).
+
+## Current contracts and behavior
+
+### Remember with `correction_target`
+
+The `remember` input requires evidence and an idempotency key. Relationship
+proposals are optional, must cite submitted evidence indices, and accept exactly
+one Entity or typed Value object (`internal/tools/registry/contract_schemas.go:18-23`,
+`64-94`, and `121-169`). The Value schema permits the five server-defined types:
+`string`, `number`, `boolean`, `date`, and `date_time`
+(`internal/domain/contract.go:455-463`). The transport validator then requires
+strings for `date` and `date_time`, a number for `number`, and a boolean for
+`boolean` (`internal/tools/registry/contract_validation.go:525-542`). A
+Relationship validity window must be ordered (`internal/tools/registry/contract_validation.go:466-479`).
+
+`correction_target` contains only a target Relationship ID and expected version
+(`internal/tools/registry/contract_schemas.go:159-169`). The Remember assessor
+plan carries it into the semantic observation without changing the typed Value
+shape (`internal/remember/service/submission_assessment_plan.go:281-310` and
+`internal/remember/service/submission_assessment_commit_input.go:270-320`).
+
+On commit, the new assessed Relationship is applied first. If it is active,
+the semantic writer checks the new source version, the target version and owner,
+the verification event, and a same-predicate semantic relation. It then inserts
+one `corrects` cross-reference whose source is the newly applied Relationship
+and whose target is the requested older Relationship
+(`internal/knowledge/postgres/placement_commit_helpers.go:28-109` and
+`119-184`). That helper does not update the target's status, version, support,
+or search document. Therefore an active old Relationship can remain alongside
+the new typed Value.
+
+The last conclusion is source-supported by the helper's write set and SQL
+(`internal/knowledge/postgres/placement_commit_helpers.go:119-184`): it only
+inserts the cross-reference after checking versions and relation identity. No
+current test directly asserts the target row remains `active`; that absence is
+a known coverage gap for this report, separate from the larger missing
+typed-Value replacement capability.
+
+The surrounding Remember commit is all-or-nothing in its PostgreSQL transaction,
+and provider work occurs before that transaction
+(`internal/knowledge/postgres/remember_commit.go:40-61` and
+`229-258`). A correction-target failure can therefore reject the complete
+Remember commit, but a successful correction target is still a lineage link,
+not a supersession operation. Request hashing and attempt replay cover the
+whole Remember request (`internal/remember/service/service.go:229-267` and
+`internal/remember/service/processor/remember_processor.go:130-178`).
+
+### `correct_relationship`
+
+The public correction schema accepts `action`, source Relationship ID and
+version, support spans, reason, idempotency key, and a patch containing only
+`subject_entity`, `predicate`, or `object_entity`
+(`internal/tools/registry/contract_schemas.go:193-245`). There is no
+`object_value`, unit, Value type, or validity-window member. A Value-backed
+Relationship cannot be patched to an Entity; the repository rejects that object
+kind change (`internal/knowledge/postgres/relationship_correction_repository.go:237-245`).
+
+For a submission, the repository requires the source to be caller-owned,
+active, canonical, supported, at the expected version, and in a live memory
+space. The requested support list must exactly equal the effective support
+spans (`internal/knowledge/postgres/relationship_correction_repository.go:214-258`).
+Entity resolution can return bounded candidates and require one owner
+confirmation round (`internal/knowledge/postgres/relationship_correction_repository.go:260-270`).
+
+The correction planner only reads the source, support, projection names, and
+active search contract before producing bounded embedding documents
+(`internal/knowledge/postgres/relationship_correction_embedding_plan.go:16-18`
+and `63-148`). The lifecycle service executes those embeddings outside the
+semantic transaction and passes validated results to the repository
+(`internal/lifecycle/service.go:150-180`). The commit then marks the original
+Relationship `superseded`, applies a successor using the existing support
+lineage, inserts the `corrects` cross-reference and correction event, updates
+search documents, and completes the durable submission in one transaction
+(`internal/knowledge/postgres/relationship_correction_helpers.go:653-839`
+and `841-921`).
+
+The correction request hash includes the source ID, expected version, patch,
+support spans, and reason. Matching retries reuse the durable submission;
+changed requests under the same key conflict
+(`internal/knowledge/postgres/relationship_correction_repository.go:593-635`).
+The public lifecycle port exposes correction planning/commit and evidence
+retraction, but not the repository's internal `RetractRelationship` method
+(`internal/knowledge/contract/write.go:67-71` and
+`internal/knowledge/postgres/semantic_repository.go:225-290`).
+
+## Current-versus-proposed behavior matrix
+
+| Situation | Current `remember` behavior | Current `correct_relationship` behavior | Supported recommendation now | Proposed bounded extension (future scope only) |
+| --- | --- | --- | --- | --- |
+| Entity or predicate was extracted incorrectly from the cited evidence | Can store a new assessed Relationship and optionally attach `correction_target`; the target remains in its prior lifecycle state. | Can replace the caller-owned Relationship, preserve exact effective supports, and atomically supersede the source. | Use `correct_relationship` with the current source version and complete support set. | Keep the existing Entity/predicate correction path; no typed-value extension is needed. |
+| Numeric Value or unit was extracted incorrectly from the cited evidence | Accepts a typed Value and can attach a correction cross-reference, but does not supersede the old Relationship. | Cannot patch the object Value or unit; a Value object cannot become an Entity. | No complete public atomic correction exists. Do not present `correction_target` as replacement; track a bounded follow-up. | Add a typed-Value patch that resolves or creates the canonical Value, reuses exact supports, and supersedes the source atomically. |
+| `date` or `date_time` was extracted incorrectly | Accepts the typed Value as a string and validates the Relationship validity window, but does not replace the old Value-backed Relationship. | Cannot patch the Value type or canonical value, and preserves the source validity window. | Same typed-Value gap; do not use a two-call approximation. | Apply the same typed-Value replacement rules, with strict date representation and explicit validity evidence. |
+| `string` or `boolean` Value was extracted incorrectly | Accepts and validates the typed Value, with the same lineage-only `correction_target` behavior. | Cannot patch any Value object. | Same typed-Value gap. | Replace the canonical typed Value under the same owner, version, support, and atomic supersession fences. |
+| Value type changed (for example `number` to `date`) | A fresh proposal can store the new type, but the old Relationship remains active if linked with `correction_target`. | No Value-type patch exists. | Treat as a new fact or a follow-up correction design; never coerce the old Value in place. | Permit a type change only when the original evidence proves mis-extraction; otherwise reject this path and require fresh Remember evidence. |
+| The real-world fact changed after the original evidence | A new Remember submission can carry fresh evidence and a new validity window. Known evidence may supplement, but accepted Relationships retain submitted support. | Reuses the existing effective support set and is therefore not a fresh-fact intake path. | Use `remember` with independent fresh evidence and no correction target. | Preserve this routing and reject typed-Value correction requests that are actually new facts. |
+| Same-team owner corrects a Relationship | Authentication fixes the owner; request fields cannot override it. | Source mutation requires the caller to own the source; same-team visibility is not mutation authority. | Reject wrong-owner attempts with the existing bounded error. | Reuse the same authenticated owner check for Value patches and every created or reused Value. |
+| Source version is stale | `correction_target.expected_version` is checked during the semantic commit; a mismatch rejects the Remember transaction. | Submit and confirm fence the source version; pending confirmation becomes a bounded changed-state rejection. | Always read the current version and retry with a new request key after a stale result. | Require the source expected version for Value patches and return the existing typed stale result without partial state. |
+| Support is missing, altered, or from the wrong space | Accepted Relationships require support; known evidence is bounded and must not replace submitted support. | Support spans must exactly match effective supports and remain in the Relationship's memory space. | Preserve exact evidence IDs, occurrences, spans, source revisions, and space ownership. | Reuse exact effective support only for a proven mis-extraction; keep support and space checks identical. |
+| Validity needs correction | Remember can propose ordered `valid_from`/`valid_to` values as part of a new observation. | Correction copies the source validity window; no validity patch is exposed. | A changed validity assertion is fresh evidence; a future correction extension must specify its evidence rule. | Either require evidence that contains the corrected window or route the request to fresh Remember; never infer the window. |
+| Retry or replay | Whole-request hash and durable attempt state replay the authoritative result or return an idempotency conflict. | Correction hash and durable submission replay the authoritative receipt or reject a changed request under the same key. | Keep retry keys scoped to the authenticated team/profile and include every correction field in the hash. | Include the complete typed-Value patch, support set, validity, and reason in the existing correction hash. |
+| Provenance and atomicity | Evidence, observation, verification, support, search state, and optional cross-reference commit together. | Original/successor states, copied supports, cross-reference, correction event, search state, and receipt commit together. | Never claim a successful lineage link is an atomic replacement. | Keep provider work outside the transaction and atomically commit Value resolution, source supersession, successor, lineage, history, and search state. |
+
+The trade-offs are explicit:
+
+| Decision dimension | Retain and document Remember | Bounded `correct_relationship` extension (future) |
+| --- | --- | --- |
+| Compatibility | Zero runtime or wire changes, but the typed-Value replacement gap remains visible to clients. | Add an optional typed-Value patch while retaining existing Entity/predicate inputs and outputs. |
+| Client effort | Existing Remember callers can submit evidence, but cannot obtain one atomic replacement for a typed Value. | Clients must read the source version and exact supports, then submit the typed patch; this matches the existing correction discipline. |
+| Policy ownership | Remember assessment and semantic commit remain the owners; `correction_target` stays a lineage operation. | Lifecycle correction remains the single owner of replacement and reuses the existing version, support, ownership, and search fences. |
+| Implementation and test cost | Documentation only; no new persistence, provider, migration, or E2E work. | Requires Value resolution, request hashing, provider/search fencing, rollback proof, and real PostgreSQL plus production-entry positive/adverse tests. |
+
+The recommendation is to retain Remember for fresh facts, retain the existing
+`correct_relationship` path for Entity/predicate mistakes, and schedule a
+separate approved implementation for the typed-Value extension. The extension
+column describes a target behavior only; it is not an API change in this
+report.
+
+## Mis-extraction versus changed fact
+
+Consider an evidence span that says “the package weighs 12 kg.” If the assessor
+stored `120 kg`, the error is a mis-extraction: the cited span is still the
+source of truth. A future typed-Value correction must be able to reuse that
+exact occurrence, source revision, quote, authority, and span while replacing
+the Value-backed Relationship atomically.
+
+If a later observation says “the package now weighs 15 kg,” that is a changed
+fact. It needs a new Remember evidence item and its own assessment, support,
+validity, and possible conflict handling. The old `12 kg` evidence cannot be
+silently repurposed to support `15 kg`. The same distinction applies to dates,
+date-times, units, strings, booleans, and a change of Value type.
+
+## Bounded future implementation scope
+
+The comparison establishes a real gap but does not authorize its implementation
+in this report. A later approved issue should keep the extension inside the
+existing lifecycle owner and correction transaction:
+
+- Add a mutually exclusive typed-Value patch variant to the correction input,
+  covering Value type, canonical value, optional unit/display, and the existing
+  normalization policy. Do not coerce a supplied Value into another type or
+  mutate a `value_records` row in place; resolve or create the canonical Value
+  and point the successor Relationship at it.
+- Decide validity-window patch semantics explicitly. A correction that changes
+  validity must either reuse evidence that states the corrected window or be
+  routed through fresh Remember evidence; it must never infer a new time window
+  from an old span that does not contain it.
+- Retain the current owner, expected-version, active/canonical/support-count,
+  exact-support, memory-space, collision, confirmation, request-hash, provider
+  fence, and search-document invariants. Keep provider execution outside the
+  authoritative transaction and commit source supersession, successor state,
+  lineage, history, and search state atomically.
+- Preserve occurrence IDs, source IDs and revisions, quotes, authority,
+  support decisions, and correction event metadata. A changed fact must not be
+  admitted through this support-reuse path merely because its Value has the
+  same type or unit.
+- Add real PostgreSQL positive and adverse cases for each Value type and unit,
+  wrong owner, stale version, support mismatch/revision change, validity
+  change, replay conflict, ambiguous selection, active collision, search-fence
+  failure, and rollback. Add a production-entry positive/adverse scenario when
+  the public contract changes.
+
+No new field, migration, registry description, public API, or ADR is proposed
+for acceptance by issue #429 itself.
+
+## Evidence and known limits
+
+The current contract and policy are covered by real-logic and PostgreSQL tests,
+including:
+
+- typed Value and validity validation in
+  `internal/tools/registry/contract_relationship_semantic_validation_test.go:69-117`;
+- Remember correction-target propagation and complete-commit input in
+  `internal/remember/service/synchronous_assessment_test.go:729-733` and
+  `internal/remember/service/submission_assessment_commit_input_test.go:263-287`;
+- typed Value canonical de-duplication in
+  `internal/knowledge/postgres/semantic_repository_integration_test.go:86-105`;
+- correction replacement, owner isolation, replay, support preservation,
+  active collision, and atomic search behavior in
+  `internal/knowledge/postgres/relationship_correction_repository_integration_test.go:25-203`
+  and `531-625`;
+- stale-version and support-revision fences in
+  `internal/knowledge/postgres/relationship_correction_fence_integration_test.go:13-150`;
+- occurrence provenance in
+  `internal/knowledge/postgres/relationship_correction_occurrence_integration_test.go:14-94`;
+- known-evidence ownership and support isolation in
+  `internal/knowledge/postgres/known_evidence_support_integration_test.go:316-390`;
+- public correction success, adverse provider cases, stale state, and
+  ownership isolation in
+  `tests/uat/synchronous_write/cases/contract.mjs:89-150`,
+  `tests/uat/synchronous_write/cases/correction.mjs:1-82`, and
+  `tests/uat/synchronous_write/cases/contract.mjs:251-322`.
+
+These tests prove the existing Entity/predicate correction path and typed Value
+intake. They do not prove atomic replacement of a Value, because the current
+`correct_relationship` schema has no Value patch and no test can exercise one.
+That missing proof is the implementation gap recorded here, not a reason to
+expand this design-only change.
+
+## Scope and rollback
+
+This report changes no runtime behavior, canonical data, public schema, or
+accepted architecture. Reverting the one document removes the recommendation;
+there is no data rollback or migration boundary. Any future implementation
+requires a separately approved issue, updated contract, real PostgreSQL and
+production-entry tests, and an independent plan audit.
