@@ -160,6 +160,7 @@ func TestCredentialProtectorMatchesRepeatedEncodingLayers(t *testing.T) {
 		expect string
 	}{
 		{name: "repeated percent encoding", secret: "a", input: "token=%2561", expect: "token=" + CredentialProtectionRedacted},
+		{name: "repeated percent encoding preserves plus", secret: "a+b", input: "token=a%252Bb", expect: "token=" + CredentialProtectionRedacted},
 		{name: "repeated unicode escaping", secret: "a", input: `token=\u005Cu0061`, expect: "token=" + CredentialProtectionRedacted},
 		{name: "repeated percent encoding of slash", secret: "secret/key", input: "url=secret%252Fkey", expect: "url=" + CredentialProtectionRedacted},
 		{name: "repeated unicode escaping of prefix", secret: "secret-key", input: `token=\u005Cu0073ecret-key`, expect: "token=" + CredentialProtectionRedacted},

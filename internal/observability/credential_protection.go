@@ -661,15 +661,20 @@ func redactCredentialTextBounded(text string, variants []credentialVariant, maxO
 		return text, len(text) <= maxOutput
 	}
 
+	type credentialTextMatch struct {
+		start int
+		end   int
+	}
+
 	outputLength := 0
-	changed := false
+	matches := make([]credentialTextMatch, 0)
 	for index := 0; index < len(text); {
 		_, consumed, ok := credentialMatchAt(text[index:], variants)
 		increment := 0
 		if ok {
 			increment = len(CredentialProtectionRedacted)
+			matches = append(matches, credentialTextMatch{start: index, end: index + consumed})
 			index += consumed
-			changed = true
 		} else {
 			_, size := utf8.DecodeRuneInString(text[index:])
 			if size == 0 {
@@ -683,25 +688,19 @@ func redactCredentialTextBounded(text string, variants []credentialVariant, maxO
 		}
 		outputLength += increment
 	}
-	if !changed {
+	if len(matches) == 0 {
 		return text, true
 	}
 
 	output := make([]byte, outputLength)
 	outputIndex := 0
-	for index := 0; index < len(text); {
-		_, consumed, ok := credentialMatchAt(text[index:], variants)
-		if ok {
-			copy(output[outputIndex:], CredentialProtectionRedacted)
-			outputIndex += len(CredentialProtectionRedacted)
-			index += consumed
-			continue
-		}
-		_, size := utf8.DecodeRuneInString(text[index:])
-		copy(output[outputIndex:], text[index:index+size])
-		outputIndex += size
-		index += size
+	textIndex := 0
+	for _, match := range matches {
+		outputIndex += copy(output[outputIndex:], text[textIndex:match.start])
+		outputIndex += copy(output[outputIndex:], CredentialProtectionRedacted)
+		textIndex = match.end
 	}
+	copy(output[outputIndex:], text[textIndex:])
 	return string(output), true
 }
 
@@ -770,6 +769,9 @@ func encodedCredentialPrefix(text, variant string, allowPercentEncoding, allowUn
 	if variant == "" {
 		return 0, true
 	}
+	if len(text) > 0 && text[0] != '%' && text[0] != '\\' && text[0] != '+' && text[0] != variant[0] {
+		return 0, false
+	}
 	if allowUnicodeEncoding {
 		if consumed, ok := decodedCredentialPrefix(text, variant, allowPercentEncoding); ok {
 			return consumed, true
@@ -786,13 +788,11 @@ func encodedCredentialPrefix(text, variant string, allowPercentEncoding, allowUn
 func literalCredentialPrefix(text, variant string, allowPercentEncoding, allowUnicodeEncoding bool) (int, bool) {
 	if allowPercentEncoding || allowUnicodeEncoding {
 		raw := rawCredentialPrefix(text, credentialRawByteLimit(len(variant)))
-		decoded := decodeCredentialLayers(raw, allowPercentEncoding, allowUnicodeEncoding, false)
-		if consumed, ok := matchDecodedCredentialPrefix(decoded, variant); ok {
+		if consumed, ok := matchCredentialLayers(raw, variant, allowPercentEncoding, allowUnicodeEncoding, false); ok {
 			return consumed, true
 		}
 		if allowPercentEncoding && allowUnicodeEncoding {
-			decoded = decodeCredentialLayers(raw, true, true, true)
-			if consumed, ok := matchDecodedCredentialPrefix(decoded, variant); ok {
+			if consumed, ok := matchCredentialLayers(raw, variant, true, true, true); ok {
 				return consumed, true
 			}
 		}

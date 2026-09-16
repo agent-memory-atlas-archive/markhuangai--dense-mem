@@ -9,36 +9,46 @@ type credentialDecodedByte struct {
 
 func decodedCredentialPrefix(text, variant string, allowPercentEncoding bool) (int, bool) {
 	raw := rawCredentialPrefix(text, credentialRawByteLimit(len(variant)))
-	decoded := decodeCredentialLayers(raw, allowPercentEncoding, true, false)
-	return matchDecodedCredentialPrefix(decoded, variant)
+	return matchCredentialLayers(raw, variant, allowPercentEncoding, true, false)
 }
 
 func reverseDecodedCredentialPrefix(text, variant string) (int, bool) {
 	raw := rawCredentialPrefix(text, credentialRawByteLimit(len(variant)))
-	decoded := decodeCredentialLayers(raw, true, true, true)
-	return matchDecodedCredentialPrefix(decoded, variant)
+	return matchCredentialLayers(raw, variant, true, true, true)
 }
 
 const maxCredentialDecodeLayers = 4
 
-func decodeCredentialLayers(input []credentialDecodedByte, allowPercentEncoding, allowUnicodeEncoding, percentFirst bool) []credentialDecodedByte {
+func matchCredentialLayers(input []credentialDecodedByte, variant string, allowPercentEncoding, allowUnicodeEncoding, percentFirst bool) (int, bool) {
 	decoded := input
 	for layer := 0; layer < maxCredentialDecodeLayers; layer++ {
+		if consumed, ok := matchDecodedCredentialPrefix(decoded, variant); ok {
+			return consumed, true
+		}
 		before := decoded
 		if percentFirst && allowPercentEncoding {
 			decoded = decodeCredentialPercentLayer(decoded)
+			if consumed, ok := matchDecodedCredentialPrefix(decoded, variant); ok {
+				return consumed, true
+			}
 		}
 		if allowUnicodeEncoding {
 			decoded = decodeCredentialEscapeLayer(decoded)
+			if consumed, ok := matchDecodedCredentialPrefix(decoded, variant); ok {
+				return consumed, true
+			}
 		}
 		if !percentFirst && allowPercentEncoding {
 			decoded = decodeCredentialPercentLayer(decoded)
+			if consumed, ok := matchDecodedCredentialPrefix(decoded, variant); ok {
+				return consumed, true
+			}
 		}
 		if credentialDecodedBytesEqual(before, decoded) {
 			break
 		}
 	}
-	return decoded
+	return 0, false
 }
 
 func credentialDecodedBytesEqual(left, right []credentialDecodedByte) bool {
