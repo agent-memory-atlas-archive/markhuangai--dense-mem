@@ -7,9 +7,9 @@ It does not change a runtime contract, schema, migration, or accepted ADR.
 ## Report provenance
 
 - Audit source: freshly fetched `origin/main` at
-  `d993e24905253b4694a4bf4375a1241c2b36e145`.
+  `9ac4ac88070f325c8fc8e61d5ba756e8c321b185`.
 - Report branch and HEAD at inspection: `docs/429-typed-value-corrections` at
-  `d993e24905253b4694a4bf4375a1241c2b36e145`.
+  `05c44a262502880fca4e7ff5d00ce77b8ad2a006`.
 - Execution checkout: `/tmp/dense-mem-429-typed-value-design`.
 - Before the report was written, the source checkout and task checkout were
   clean, protected Git configuration was recorded without exposing values, and
@@ -31,12 +31,16 @@ Use the workflow that matches what was wrong in the original observation:
    with fresh evidence. Do not use `correction_target` to reuse old evidence
    for a new value.
 3. For a mis-extracted typed Value, the current public contract has no complete
-   atomic replacement workflow. `remember.correction_target` can associate a
-   newly accepted Relationship with an older one, but it does not transition
-   the older Relationship out of `active`. `correct_relationship` cannot patch
-   an object Value, unit, type, or validity window. Clients must not describe
-   either path as a completed typed-Value correction until a follow-up
-   implementation adds that capability.
+   atomic replacement workflow. For a `current_cardinality = one` predicate,
+   `remember.correction_target` becomes stale and rolls back the whole Remember
+   transaction only when the target is a matching active sibling under the
+   one-cardinality selector; a semantically related target outside that selector
+   can still receive a lineage link. Predicates that allow multiple active
+   Relationships likewise can add only a lineage link and leave the older
+   Relationship active. `correct_relationship` cannot patch an object Value,
+   unit, type, or validity window. Clients must not describe either path as a
+   completed typed-Value correction until a follow-up implementation adds that
+   capability.
 
 This is the smallest sufficient current guidance. A pair of separate calls
 that retracts or replaces one item and then writes another would leave a window
@@ -93,22 +97,32 @@ plan carries it into the semantic observation without changing the typed Value
 shape (`internal/remember/service/submission_assessment_plan.go:281-310` and
 `internal/remember/service/submission_assessment_commit_input.go:270-320`).
 
-On commit, the new assessed Relationship is applied first. If it is active,
-the semantic writer checks the new source version, the target version and owner,
-the verification event, and a same-predicate semantic relation. It then inserts
-one `corrects` cross-reference whose source is the newly applied Relationship
-and whose target is the requested older Relationship
-(`internal/knowledge/postgres/placement_commit_helpers.go:28-109` and
-`119-184`). That helper does not update the target's status, version, support,
-or search document. Therefore an active old Relationship can remain alongside
-the new typed Value.
+On commit, the new assessed Relationship is applied first. When the predicate
+has `current_cardinality = one`, applying an active Relationship first
+supersedes matching active siblings and increments their versions
+(`internal/knowledge/postgres/semantic_helpers.go:544-552` and
+`internal/knowledge/postgres/semantic_support_helpers.go:24-99`). If the target
+matches that selector (same owner, subject, predicate, polarity, validity start,
+scope, active/canonical/support conditions, and predicate-version/cardinality
+fences), `appendSemanticCorrectionTarget` then checks the
+caller-supplied older version, returns `ErrCorrectionTargetStale`, and the
+enclosing Remember transaction rolls back (`internal/knowledge/postgres/placement_commit_helpers.go:28-109`
+and `119-184`; `internal/knowledge/postgres/remember_commit.go:241-247` and
+`298-300`). The target therefore remains active and neither the new Relationship
+nor a cross-reference commits.
 
-The last conclusion is source-supported by the helper's write set and SQL
-(`internal/knowledge/postgres/placement_commit_helpers.go:119-184`): it only
-inserts the cross-reference after checking versions and relation identity. No
-current test directly asserts the target row remains `active`; that absence is
-a known coverage gap for this report, separate from the larger missing
-typed-Value replacement capability.
+For predicates that allow multiple active Relationships, no sibling
+supersession runs. The helper checks the new source version, target version and
+owner, the verification event, and a same-predicate semantic relation, then
+inserts one `corrects` cross-reference. It does not update the target's status,
+version, support, or search document, so an active old Relationship can remain
+alongside the new typed Value (`internal/knowledge/postgres/placement_commit_helpers.go:119-184`).
+
+The ordinary one-cardinality supersession test proves the version-advancing
+state transition (`internal/knowledge/postgres/semantic_repository_integration_test.go:563-624`),
+but no current test directly exercises a Remember `correction_target` outcome
+for either cardinality. That absence is a known coverage gap for this report,
+separate from the larger missing typed-Value replacement capability.
 
 The surrounding Remember commit is all-or-nothing in its PostgreSQL transaction,
 and provider work occurs before that transaction
@@ -161,11 +175,13 @@ retraction, but not the repository's internal `RetractRelationship` method
 
 | Situation | Current `remember` behavior | Current `correct_relationship` behavior | Supported recommendation now | Proposed bounded extension (future scope only) |
 | --- | --- | --- | --- | --- |
-| Entity or predicate was extracted incorrectly from the cited evidence | Can store a new assessed Relationship and optionally attach `correction_target`; the target remains in its prior lifecycle state. | Can replace the caller-owned Relationship, preserve exact effective supports, and atomically supersede the source. | Use `correct_relationship` with the current source version and complete support set. | Keep the existing Entity/predicate correction path; no typed-value extension is needed. |
-| Numeric Value or unit was extracted incorrectly from the cited evidence | Accepts a typed Value and can attach a correction cross-reference, but does not supersede the old Relationship. | Cannot patch the object Value or unit; a Value object cannot become an Entity. | No complete public atomic correction exists. Do not present `correction_target` as replacement; track a bounded follow-up. | Add a typed-Value patch that resolves or creates the canonical Value, reuses exact supports, and supersedes the source atomically. |
-| `date` or `date_time` was extracted incorrectly | Accepts the typed Value as a string and validates the Relationship validity window, but does not replace the old Value-backed Relationship. | Cannot patch the Value type or canonical value, and preserves the source validity window. | Same typed-Value gap; do not use a two-call approximation. | Apply the same typed-Value replacement rules, with strict date representation and explicit validity evidence. |
-| `string` or `boolean` Value was extracted incorrectly | Accepts and validates the typed Value, with the same lineage-only `correction_target` behavior. | Cannot patch any Value object. | Same typed-Value gap. | Replace the canonical typed Value under the same owner, version, support, and atomic supersession fences. |
-| Value type changed (for example `number` to `date`) | A fresh proposal can store the new type, but the old Relationship remains active if linked with `correction_target`. | No Value-type patch exists. | Treat as a new fact or a follow-up correction design; never coerce the old Value in place. | Permit a type change only when the original evidence proves mis-extraction; otherwise reject this path and require fresh Remember evidence. |
+| Entity or predicate was extracted incorrectly from the cited evidence | For predicates allowing multiple active Relationships, can store a new assessed Relationship and optionally attach `correction_target`; the target remains in its prior lifecycle state. For `current_cardinality = one`, a matching active sibling follows the stale-version rollback described below, while a semantically related target outside that selector can receive only a lineage link and remain active. | Can replace the caller-owned Relationship, preserve exact effective supports, and atomically supersede the source. | Use `correct_relationship` with the current source version and complete support set. | Keep the existing Entity/predicate correction path; no typed-value extension is needed. |
+| Typed Value was extracted incorrectly for a `current_cardinality = one` predicate whose target is a matching active sibling | Applying the new active Relationship supersedes the target and increments its version before `correction_target` checks the supplied version; the check returns `ErrCorrectionTargetStale`, so the whole Remember transaction rolls back and no correction link commits. | Cannot patch the object Value or unit; a Value object cannot become an Entity. | No complete public atomic correction exists. Treat the stale result as a rolled-back attempt; do not present `correction_target` as replacement. | Add a typed-Value patch that resolves or creates the canonical Value, reuses exact supports, and supersedes the source atomically. |
+| Typed Value was extracted incorrectly for a `current_cardinality = one` predicate whose target is semantically related but not a matching active sibling | The target is not selected for one-cardinality supersession, so its expected version remains current and `correction_target` can commit only a `corrects` lineage link; the old Relationship remains active. | Cannot patch the object Value or unit; a Value object cannot become an Entity. | No complete public atomic correction exists. Do not present the lineage link as replacement; track a bounded follow-up. | Add a typed-Value patch that resolves or creates the canonical Value, reuses exact supports, and supersedes the source atomically. |
+| Numeric Value or unit was extracted incorrectly for a predicate allowing multiple active Relationships | Accepts a typed Value and can attach a correction cross-reference, but does not supersede the old Relationship. | Cannot patch the object Value or unit; a Value object cannot become an Entity. | No complete public atomic correction exists. Do not present `correction_target` as replacement; track a bounded follow-up. | Add a typed-Value patch that resolves or creates the canonical Value, reuses exact supports, and supersedes the source atomically. |
+| `date` or `date_time` was extracted incorrectly | Accepts the typed Value as a string and validates the Relationship validity window. For multiple-cardinality predicates, or one-cardinality targets outside the matching-sibling selector, it can add only a lineage link; a matching one-cardinality sibling follows the stale-version rollback described above. | Cannot patch the Value type or canonical value, and preserves the source validity window. | Same typed-Value gap; do not use a two-call approximation. | Apply the same typed-Value replacement rules, with strict date representation and explicit validity evidence. |
+| `string` or `boolean` Value was extracted incorrectly | Accepts and validates the typed Value. For multiple-cardinality predicates, or one-cardinality targets outside the matching-sibling selector, it has the same lineage-only `correction_target` behavior; a matching one-cardinality sibling follows the stale-version rollback described above. | Cannot patch any Value object. | Same typed-Value gap. | Replace the canonical typed Value under the same owner, version, support, and atomic supersession fences. |
+| Value type changed (for example `number` to `date`) | A fresh proposal can store the new type. A multiple-cardinality `correction_target`, or a one-cardinality target outside the matching-sibling selector, leaves the old Relationship active; a matching one-cardinality sibling follows the stale-version rollback described above. | No Value-type patch exists. | Treat as a new fact or a follow-up correction design; never coerce the old Value in place. | Permit a type change only when the original evidence proves mis-extraction; otherwise reject this path and require fresh Remember evidence. |
 | The real-world fact changed after the original evidence | A new Remember submission can carry fresh evidence and a new validity window. Known evidence may supplement, but accepted Relationships retain submitted support. | Reuses the existing effective support set and is therefore not a fresh-fact intake path. | Use `remember` with independent fresh evidence and no correction target. | Preserve this routing and reject typed-Value correction requests that are actually new facts. |
 | Same-team owner corrects a Relationship | Authentication fixes the owner; request fields cannot override it. | Source mutation requires the caller to own the source; same-team visibility is not mutation authority. | Reject wrong-owner attempts with the existing bounded error. | Reuse the same authenticated owner check for Value patches and every created or reused Value. |
 | Source version is stale | `correction_target.expected_version` is checked during the semantic commit; a mismatch rejects the Remember transaction. | Submit and confirm fence the source version; pending confirmation becomes a bounded changed-state rejection. | Always read the current version and retry with a new request key after a stale result. | Require the source expected version for Value patches and return the existing typed stale result without partial state. |
