@@ -165,10 +165,55 @@ func TestCredentialProtectorHandlesNilAndEmptyConfiguration(t *testing.T) {
 	got := nilProtector.Snapshot("safe", 256)
 	require.Empty(t, got.UnavailableReason)
 	require.Equal(t, "safe", got.Value)
+	require.Empty(t, userInfoEscape(""))
 
 	got = NewCredentialProtector("").Snapshot("safe", 256)
 	require.Empty(t, got.UnavailableReason)
 	require.Equal(t, "safe", got.Value)
+
+	got = NewCredentialProtector("same").Snapshot("same", 256, "same")
+	require.Empty(t, got.UnavailableReason)
+	require.Equal(t, CredentialProtectionRedacted, got.Value)
+}
+
+func TestCredentialProtectorLeavesTruncatedEncodedCredentialsUntouched(t *testing.T) {
+	tests := []struct {
+		name   string
+		secret string
+		input  string
+	}{
+		{name: "unicode escape", secret: "secret", input: `token=\u0073ecre`},
+		{name: "percent escape", secret: "abc", input: "token=%61b"},
+		{name: "multibyte percent escape", secret: "é", input: "token=%C3"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := NewCredentialProtector(test.secret).Snapshot(test.input, 256)
+			require.Empty(t, got.UnavailableReason)
+			require.Equal(t, test.input, got.Value)
+		})
+	}
+}
+
+func TestCredentialVariantMatcherModes(t *testing.T) {
+	unicodeVariant := credentialVariant{text: "é", allowUnicodeEncoding: true}
+	consumed, ok := credentialPrefix(`\u00E9`, unicodeVariant)
+	require.True(t, ok)
+	require.Equal(t, 6, consumed)
+
+	plainVariant := credentialVariant{text: "plain"}
+	consumed, ok = credentialPrefix("plain", plainVariant)
+	require.True(t, ok)
+	require.Equal(t, len(plainVariant.text), consumed)
+	_, ok = credentialPrefix("other", plainVariant)
+	require.False(t, ok)
+
+	merged := mergeCredentialVariants(
+		[]credentialVariant{{text: "same"}},
+		[]credentialVariant{{text: "same", allowUnicodeEncoding: true}},
+	)
+	require.Len(t, merged, 2)
+	require.True(t, merged[0].allowUnicodeEncoding)
 }
 
 func TestCredentialProtectorRejectsUnsafeValuesWithoutRawFallback(t *testing.T) {
