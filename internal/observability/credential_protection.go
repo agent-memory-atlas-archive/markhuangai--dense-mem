@@ -96,6 +96,9 @@ func (p *CredentialProtector) Snapshot(value any, maxBytes int, authenticatedSec
 	if len(encoded) > maxBytes {
 		return unavailableDiagnostic(CredentialProtectionBudgetExceeded)
 	}
+	if credentialTextContainsVariant(string(encoded), variants) {
+		return unavailableDiagnostic(CredentialProtectionFormattingFailed)
+	}
 	return ProtectedDiagnostic{Value: snapshot}
 }
 
@@ -754,12 +757,22 @@ func encodedCredentialPrefix(text, variant string, allowPercentEncoding, allowUn
 		if textIndex >= len(text) {
 			return 0, false
 		}
+		if allowUnicodeEncoding {
+			if decoded, consumed, ok := decodeGoByteEscape(text[textIndex:]); ok {
+				if decoded != variant[variantIndex] {
+					return 0, false
+				}
+				textIndex += consumed
+				variantIndex++
+				continue
+			}
+		}
 		expected, size := utf8.DecodeRuneInString(variant[variantIndex:])
 		if size == 0 {
 			return 0, false
 		}
 		if allowUnicodeEncoding {
-			if decoded, consumed, ok := decodeJSONEscape(text[textIndex:]); ok && decoded == expected {
+			if decoded, consumed, ok := decodeEscapedRune(text[textIndex:]); ok && decoded == expected {
 				textIndex += consumed
 				variantIndex += size
 				continue
@@ -790,13 +803,15 @@ func encodedCredentialPrefix(text, variant string, allowPercentEncoding, allowUn
 	return textIndex, true
 }
 
-func decodeJSONEscape(text string) (rune, int, bool) {
+func decodeEscapedRune(text string) (rune, int, bool) {
 	if len(text) < 2 || text[0] != '\\' {
 		return 0, 0, false
 	}
 	switch text[1] {
-	case '"', '\\', '/':
+	case '"', '\\', '\'', '/':
 		return rune(text[1]), 2, true
+	case 'a':
+		return '\a', 2, true
 	case 'b':
 		return '\b', 2, true
 	case 'f':
@@ -807,14 +822,27 @@ func decodeJSONEscape(text string) (rune, int, bool) {
 		return '\r', 2, true
 	case 't':
 		return '\t', 2, true
+	case 'v':
+		return '\v', 2, true
 	case 'u':
 		if len(text) < 6 || !isHexDigit(text[2]) || !isHexDigit(text[3]) || !isHexDigit(text[4]) || !isHexDigit(text[5]) {
+			return 0, 0, false
+		}
+	case 'U':
+		if len(text) < 10 || !isHexDigit(text[2]) || !isHexDigit(text[3]) || !isHexDigit(text[4]) || !isHexDigit(text[5]) || !isHexDigit(text[6]) || !isHexDigit(text[7]) || !isHexDigit(text[8]) || !isHexDigit(text[9]) {
 			return 0, 0, false
 		}
 	default:
 		return 0, 0, false
 	}
 	code := rune(hexDigit(text[2]))<<12 | rune(hexDigit(text[3]))<<8 | rune(hexDigit(text[4]))<<4 | rune(hexDigit(text[5]))
+	if text[1] == 'U' {
+		code = code<<16 | rune(hexDigit(text[6]))<<12 | rune(hexDigit(text[7]))<<8 | rune(hexDigit(text[8]))<<4 | rune(hexDigit(text[9]))
+		if code > utf8.MaxRune || code >= 0xD800 && code <= 0xDFFF {
+			return 0, 0, false
+		}
+		return code, 10, true
+	}
 	if code >= 0xD800 && code <= 0xDBFF {
 		if len(text) >= 12 && text[6] == '\\' && text[7] == 'u' && isHexDigit(text[8]) && isHexDigit(text[9]) && isHexDigit(text[10]) && isHexDigit(text[11]) {
 			low := rune(hexDigit(text[8]))<<12 | rune(hexDigit(text[9]))<<8 | rune(hexDigit(text[10]))<<4 | rune(hexDigit(text[11]))
@@ -828,6 +856,25 @@ func decodeJSONEscape(text string) (rune, int, bool) {
 		return utf8.RuneError, 6, true
 	}
 	return code, 6, true
+}
+
+func decodeGoByteEscape(text string) (byte, int, bool) {
+	if len(text) < 2 || text[0] != '\\' {
+		return 0, 0, false
+	}
+	if text[1] == 'x' {
+		if len(text) < 4 || !isHexDigit(text[2]) || !isHexDigit(text[3]) {
+			return 0, 0, false
+		}
+		return hexByte(text[2], text[3]), 4, true
+	}
+	if text[1] < '0' || text[1] > '7' {
+		return 0, 0, false
+	}
+	if len(text) < 4 || text[1] > '3' || text[2] < '0' || text[2] > '7' || text[3] < '0' || text[3] > '7' {
+		return 0, 0, false
+	}
+	return (text[1]-'0')<<6 | (text[2]-'0')<<3 | (text[3] - '0'), 4, true
 }
 
 func isHexDigit(value byte) bool {

@@ -178,6 +178,35 @@ func TestCredentialProtectorMatchesJSONShortEscapes(t *testing.T) {
 	}
 }
 
+func TestCredentialProtectorMatchesNoncanonicalGoEscapes(t *testing.T) {
+	tests := []struct {
+		name   string
+		secret string
+		input  string
+	}{
+		{name: "hex byte", secret: "secret-key", input: `{"password":"\x73ecret-key"}`},
+		{name: "hex bytes for utf8", secret: "é", input: `{"password":"\xC3\xA9"}`},
+		{name: "unicode", secret: "secret-key", input: `{"password":"\U00000073ecret-key"}`},
+		{name: "octal byte", secret: "secret-key", input: `{"password":"\163ecret-key"}`},
+		{name: "alert", secret: "a\ab", input: `{"password":"a\ab"}`},
+		{name: "vertical tab", secret: "a\vb", input: `{"password":"a\vb"}`},
+		{name: "apostrophe", secret: "a'b", input: `{"password":"a\'b"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := NewCredentialProtector(test.secret).Snapshot(test.input, 256)
+			require.Empty(t, got.UnavailableReason)
+			require.Equal(t, `{"password":"`+CredentialProtectionRedacted+`"}`, got.Value)
+		})
+	}
+}
+
+func TestCredentialProtectorFailsClosedWhenJSONSerializationRevealsCredential(t *testing.T) {
+	got := NewCredentialProtector(`\u003c`).Snapshot("<", 256)
+	require.Equal(t, CredentialProtectionFormattingFailed, got.UnavailableReason)
+	require.Nil(t, got.Value)
+}
+
 func TestCredentialProtectorFailsClosedWhenMarkerContainsCredential(t *testing.T) {
 	tests := []string{"REDACTED", "DACT"}
 	for _, secret := range tests {
