@@ -111,9 +111,15 @@
 - Use the existing Echo DTO, binding, and validation helpers. Long-lived
   streams must honor context cancellation, enforce configured bounds, and
   release concurrency slots on every disconnect or error path.
-- Never log or forward raw credentials, cookies, tokens, prompts, embeddings,
-  provider responses, database errors, stack traces, or cross-team existence
-  details. Public errors must be bounded and safe.
+- Never log or forward raw operational credentials, cookies, or authentication
+  material. After schema validation and the initial security scan, admitted user
+  fields and text may remain exact in bounded operator diagnostics when needed
+  to diagnose later rejection or provider failure; initial security rejection
+  remains content-free. Protect configured operational secrets and authentication
+  material, including supported serialized forms, through `internal/observability`;
+  field names or secret-like text alone do not cause masking. Public HTTP/MCP
+  errors, audit projections, and external exports retain separate bounded
+  exposure contracts, and cross-team existence details must not be exposed.
 - Every isolation-sensitive feature needs real team/profile tests. Include
   different owners when read visibility and mutation authority differ; use
   A/B/C actors for cross-profile correction or conflict behavior.
