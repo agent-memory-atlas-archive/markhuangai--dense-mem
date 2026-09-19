@@ -147,6 +147,11 @@ func AuthMiddlewareWithOptions(repo accessservice.CredentialStore, auditSvc acce
 				logAuthFailure(c, auditSvc, securitySvc, nil, "AUTH_INVALID", "empty bearer token")
 				return httperr.New(httperr.AUTH_INVALID, "empty bearer token")
 			}
+			// Keep the presented credential available for redaction if authentication
+			// or a later authorization check rejects the request. This does not admit
+			// an actor or principal.
+			ctx := requestctx.WithAuthenticationSecrets(c.Request().Context(), rawKey)
+			c.SetRequest(c.Request().WithContext(ctx))
 
 			pathTeamID, err := authenticatedPathTeamID(c)
 			if err != nil {
@@ -173,8 +178,10 @@ func AuthMiddlewareWithOptions(repo accessservice.CredentialStore, auditSvc acce
 				if err != nil {
 					return err
 				}
-				ctx := context.WithValue(c.Request().Context(), principalContextKey{}, principal)
+				ctx := c.Request().Context()
+				ctx = context.WithValue(ctx, principalContextKey{}, principal)
 				ctx = requestctx.WithActor(ctx, actorContext)
+				ctx = requestctx.WithAuthenticationVerified(ctx)
 				req := c.Request().Clone(ctx)
 				req.Header.Del("Authorization")
 				c.SetRequest(req)
@@ -192,7 +199,6 @@ func AuthMiddlewareWithOptions(repo accessservice.CredentialStore, auditSvc acce
 			}
 
 			// Look up active key by prefix
-			ctx := c.Request().Context()
 			var (
 				key    *domain.Credential
 				prefix string
@@ -266,19 +272,22 @@ func AuthMiddlewareWithOptions(repo accessservice.CredentialStore, auditSvc acce
 				logAuthFailure(c, auditSvc, securitySvc, nil, "AUTH_INVALID", "api credential is not team bound")
 				return httperr.New(httperr.AUTH_INVALID, "invalid api key")
 			}
-			if pathTeamID != nil && teamID != *pathTeamID {
-				teamIDStr := teamID.String()
-				logAuthFailure(c, auditSvc, securitySvc, &teamIDStr, "TEAM_PATH_MISMATCH", "scoped mcp team does not match credential")
-				return httperr.New(httperr.FORBIDDEN, "access denied to this team")
-			}
 
 			actor := authenticatedActorFromCredential(key)
 			principal, actorContext, err := principalAndActorContext(actor, "api_key", prefix)
 			if err != nil {
 				return err
 			}
-			ctx = context.WithValue(ctx, principalContextKey{}, principal)
 			ctx = requestctx.WithActor(ctx, actorContext)
+			ctx = requestctx.WithAuthenticationVerified(ctx)
+			if pathTeamID != nil && teamID != *pathTeamID {
+				c.SetRequest(c.Request().WithContext(ctx))
+				teamIDStr := teamID.String()
+				logAuthFailure(c, auditSvc, securitySvc, &teamIDStr, "TEAM_PATH_MISMATCH", "scoped mcp team does not match credential")
+				return httperr.New(httperr.FORBIDDEN, "access denied to this team")
+			}
+
+			ctx = context.WithValue(ctx, principalContextKey{}, principal)
 
 			// Remove the Authorization header to prevent downstream access to raw key
 			req := c.Request().Clone(ctx)
@@ -334,11 +343,17 @@ func authenticateSSOSession(c echo.Context, authenticator SSOSessionAuthenticato
 			csrfToken = csrfCookie.Value
 		}
 	}
+	secrets := []string{cookie.Value}
+	if csrfToken != "" {
+		secrets = append(secrets, csrfToken)
+	}
+	ctx := requestctx.WithAuthenticationSecrets(c.Request().Context(), secrets...)
+	c.SetRequest(c.Request().WithContext(ctx))
 	actor, err := authenticator.AuthenticateSession(c.Request().Context(), cookie.Value, csrfToken, requireCSRF)
 	if err != nil {
 		return ssoAuthError(err)
 	}
-	return setSessionPrincipal(c, actor, "sso_session")
+	return setSessionPrincipal(c, actor, "sso_session", cookie.Value, csrfToken)
 }
 
 func authenticateUserPortalSession(c echo.Context, authenticator UserPortalSessionAuthenticator, entitlementValidator SSOEntitlementValidator) error {
@@ -348,6 +363,12 @@ func authenticateUserPortalSession(c echo.Context, authenticator UserPortalSessi
 	}
 	requireCSRF := requestRequiresCSRF(c.Request().Method)
 	csrfToken := c.Request().Header.Get(accessservice.SSOCSRFHeaderName)
+	secrets := []string{cookie.Value}
+	if csrfToken != "" {
+		secrets = append(secrets, csrfToken)
+	}
+	ctx := requestctx.WithAuthenticationSecrets(c.Request().Context(), secrets...)
+	c.SetRequest(c.Request().WithContext(ctx))
 	actor, err := authenticator.AuthenticateSession(c.Request().Context(), cookie.Value, csrfToken, requireCSRF)
 	if err != nil {
 		return userPortalSessionAuthError(err)
@@ -365,16 +386,18 @@ func authenticateUserPortalSession(c echo.Context, authenticator UserPortalSessi
 		}
 		actor = authenticatedActorFromCredential(validated)
 	}
-	return setSessionPrincipal(c, actor, "credential_session")
+	return setSessionPrincipal(c, actor, "credential_session", cookie.Value, csrfToken)
 }
 
-func setSessionPrincipal(c echo.Context, actor *domain.AuthenticatedActor, authMethod string) error {
+func setSessionPrincipal(c echo.Context, actor *domain.AuthenticatedActor, authMethod string, secrets ...string) error {
 	principal, actorContext, err := principalAndActorContext(actor, authMethod, "")
 	if err != nil {
 		return err
 	}
-	ctx := context.WithValue(c.Request().Context(), principalContextKey{}, principal)
+	ctx := requestctx.WithAuthenticationSecrets(c.Request().Context(), secrets...)
+	ctx = context.WithValue(ctx, principalContextKey{}, principal)
 	ctx = requestctx.WithActor(ctx, actorContext)
+	ctx = requestctx.WithAuthenticationVerified(ctx)
 	c.SetRequest(c.Request().WithContext(ctx))
 	return nil
 }

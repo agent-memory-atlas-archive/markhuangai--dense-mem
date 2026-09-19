@@ -2,16 +2,15 @@ package middleware
 
 import (
 	"context"
+	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/google/uuid"
-	"github.com/labstack/echo/v4"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/markhuangai/dense-mem/internal/crypto"
 	"github.com/markhuangai/dense-mem/internal/domain"
@@ -500,6 +499,7 @@ func TestAuthMiddleware_ValidKey_StoresPrincipal(t *testing.T) {
 	var capturedPrincipal *Principal
 	e.GET("/test", func(c echo.Context) error {
 		capturedPrincipal = GetPrincipal(c.Request().Context())
+		assert.Equal(t, []string{rawKey}, requestctx.AuthenticationSecretsFromContext(c.Request().Context()))
 
 		// Verify Authorization header is removed
 		authHeader := c.Request().Header.Get("Authorization")
@@ -567,9 +567,9 @@ func TestAuthMiddleware_SSOEntitlementValidatorOverridesPrincipal(t *testing.T) 
 	e.GET("/test", func(c echo.Context) error {
 		capturedPrincipal = GetPrincipal(c.Request().Context())
 		capturedActor, actorOK = requestctx.ActorFromContext(c.Request().Context())
+		assert.True(t, requestctx.AuthenticationVerifiedFromContext(c.Request().Context()))
 		return c.String(http.StatusOK, "ok")
 	})
-
 	e.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusOK, rec.Code)

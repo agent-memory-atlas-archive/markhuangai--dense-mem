@@ -10,6 +10,8 @@ import (
 
 type actorContextKey struct{}
 type allowedSpacesContextKey struct{}
+type authenticationSecretsContextKey struct{}
+type authenticatedContextKey struct{}
 
 // Actor is the immutable authenticated identity projected into application code.
 // OwnerID is the permanent semantic ownership alias; it is distinct from the
@@ -66,4 +68,44 @@ func ActorOwner(ctx context.Context) (ownerID, ownerName string, ok bool) {
 		return "", "", false
 	}
 	return actor.OwnerID.String(), actor.OwnerName, true
+}
+
+// WithAuthenticationSecrets carries presented authentication material to
+// trusted operator logging for redaction. Callers may attach it before
+// validation without admitting an actor; values are copied so downstream code
+// cannot mutate the request context.
+func WithAuthenticationSecrets(ctx context.Context, secrets ...string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, authenticationSecretsContextKey{}, append([]string(nil), secrets...))
+}
+
+func AuthenticationSecretsFromContext(ctx context.Context) []string {
+	if ctx == nil {
+		return nil
+	}
+	secrets, _ := ctx.Value(authenticationSecretsContextKey{}).([]string)
+	return append([]string(nil), secrets...)
+}
+
+// WithAuthenticationVerified marks a context after the presented credential
+// has passed its owning authenticator. It is separate from the redaction-only
+// authentication secret context so log attribution cannot trust unverified
+// material.
+func WithAuthenticationVerified(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, authenticatedContextKey{}, true)
+}
+
+// AuthenticationVerifiedFromContext reports whether a trusted authenticator
+// marked the context after validating its presented credential.
+func AuthenticationVerifiedFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	verified, _ := ctx.Value(authenticatedContextKey{}).(bool)
+	return verified
 }

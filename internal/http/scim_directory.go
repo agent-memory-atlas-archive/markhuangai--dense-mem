@@ -18,6 +18,7 @@ import (
 
 	"github.com/markhuangai/dense-mem/internal/domain"
 	httpcontract "github.com/markhuangai/dense-mem/internal/http/contract"
+	"github.com/markhuangai/dense-mem/internal/requestctx"
 	accessservice "github.com/markhuangai/dense-mem/internal/service/access"
 	settings "github.com/markhuangai/dense-mem/internal/settings"
 )
@@ -134,7 +135,10 @@ func (h *directorySCIMHandler) oauthToken(c echo.Context) error {
 		clientID = c.FormValue("client_id")
 		clientSecret = c.FormValue("client_secret")
 	}
-	token, expiresAt, err := h.directory.IssueOAuthToken(c.Request().Context(), clientID, clientSecret)
+	presentedSecrets := directoryOAuthPresentedSecrets(c.Request(), clientSecret)
+	issueContext := requestctx.WithAuthenticationSecrets(c.Request().Context(), presentedSecrets...)
+	c.SetRequest(c.Request().WithContext(issueContext))
+	token, expiresAt, err := h.directory.IssueOAuthToken(issueContext, clientID, clientSecret)
 	if err != nil {
 		if errors.Is(err, accessservice.ErrDirectoryCredentialInvalid) {
 			recordDirectoryOAuthAuthFailure(c, h.security)
@@ -142,6 +146,8 @@ func (h *directorySCIMHandler) oauthToken(c echo.Context) error {
 		}
 		return directoryOAuthError(c, nethttp.StatusInternalServerError, "server_error")
 	}
+	issueContext = requestctx.WithAuthenticationVerified(issueContext)
+	c.SetRequest(c.Request().WithContext(issueContext))
 	expiresIn := int(time.Until(expiresAt).Seconds())
 	if expiresIn < 1 {
 		expiresIn = 1
@@ -164,6 +170,31 @@ func directoryOAuthNoStore(c echo.Context) {
 	c.Response().Header().Set("Pragma", "no-cache")
 }
 
+func directoryOAuthPresentedSecrets(request *nethttp.Request, clientSecret string) []string {
+	secrets := make([]string, 0, 3)
+	appendSecret := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		for _, existing := range secrets {
+			if existing == value {
+				return
+			}
+		}
+		secrets = append(secrets, value)
+	}
+	appendSecret(clientSecret)
+	if request != nil {
+		authorization := strings.TrimSpace(request.Header.Get(echo.HeaderAuthorization))
+		if len(authorization) > len("Basic ") && strings.EqualFold(authorization[:len("Basic ")], "Basic ") {
+			appendSecret(authorization[len("Basic "):])
+			appendSecret(authorization)
+		}
+	}
+	return secrets
+}
+
 func recordDirectoryOAuthAuthFailure(c echo.Context, securitySvc settings.SecurityService) {
 	if securitySvc == nil {
 		return
@@ -184,6 +215,8 @@ func (h *directorySCIMHandler) serve(c echo.Context) error {
 	if !ok {
 		return directorySCIMError(c, scimerrors.ScimError{Status: nethttp.StatusUnauthorized})
 	}
+	ctx := requestctx.WithAuthenticationSecrets(c.Request().Context(), rawToken)
+	c.SetRequest(c.Request().WithContext(ctx))
 	valid, err := h.directory.AuthenticateSCIM(c.Request().Context(), connectorID, rawToken)
 	if err != nil {
 		if errors.Is(err, accessservice.ErrDirectoryCredentialInvalid) || errors.Is(err, accessservice.ErrDirectoryConnectorDisabled) || errors.Is(err, accessservice.ErrDirectoryResourceNotFound) {
@@ -194,8 +227,11 @@ func (h *directorySCIMHandler) serve(c echo.Context) error {
 	if !valid {
 		return directorySCIMError(c, scimerrors.ScimError{Status: nethttp.StatusUnauthorized})
 	}
+	ctx = requestctx.WithAuthenticationVerified(c.Request().Context())
+	c.SetRequest(c.Request().WithContext(ctx))
 
-	request := c.Request().Clone(context.WithValue(c.Request().Context(), directorySCIMContextKey{}, connectorID))
+	request := directorySCIMAuthenticatedRequest(c.Request(), connectorID, rawToken)
+	c.SetRequest(c.Request().WithContext(request.Context()))
 	requestURL := *c.Request().URL
 	request.URL = &requestURL
 	resourcePath := strings.TrimPrefix(c.Param("*"), "/")
@@ -206,7 +242,7 @@ func (h *directorySCIMHandler) serve(c echo.Context) error {
 	}
 	publicBaseURL := h.publicBaseURL
 	if h.runtimeConfigSource != nil {
-		runtime, err := h.runtimeConfigSource.SSORuntimeConfig(c.Request().Context())
+		runtime, err := h.runtimeConfigSource.SSORuntimeConfig(request.Context())
 		if err != nil {
 			return directorySCIMError(c, scimerrors.ScimErrorInternal)
 		}
@@ -224,6 +260,18 @@ func (h *directorySCIMHandler) serve(c echo.Context) error {
 	}
 	server.ServeHTTP(c.Response(), request)
 	return nil
+}
+
+func directorySCIMAuthenticatedRequest(request *nethttp.Request, connectorID uuid.UUID, rawToken string) *nethttp.Request {
+	if request == nil {
+		return nil
+	}
+	ctx := requestctx.WithAuthenticationSecrets(request.Context(), rawToken)
+	ctx = requestctx.WithAuthenticationVerified(ctx)
+	ctx = context.WithValue(ctx, directorySCIMContextKey{}, connectorID)
+	forwarded := request.Clone(ctx)
+	forwarded.Header.Del(echo.HeaderAuthorization)
+	return forwarded
 }
 
 func directoryBearerToken(request *nethttp.Request) (string, bool) {

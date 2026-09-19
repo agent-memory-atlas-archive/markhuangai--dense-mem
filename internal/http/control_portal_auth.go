@@ -10,6 +10,7 @@ import (
 	"github.com/labstack/echo/v4"
 
 	"github.com/markhuangai/dense-mem/internal/httperr"
+	"github.com/markhuangai/dense-mem/internal/requestctx"
 	accessservice "github.com/markhuangai/dense-mem/internal/service/access"
 	settings "github.com/markhuangai/dense-mem/internal/settings"
 )
@@ -52,6 +53,11 @@ func controlPortalMiddleware(token string, securitySvc settings.SecurityService,
 		return func(c echo.Context) error {
 			actor := ""
 			actorIdentity := ""
+			authSecrets := controlPortalPresentedSecrets(c.Request())
+			if len(authSecrets) > 0 {
+				ctx := requestctx.WithAuthenticationSecrets(c.Request().Context(), authSecrets...)
+				c.SetRequest(c.Request().WithContext(ctx))
+			}
 			if controlTokenMatches(c.Request(), token) {
 				actor = controlPortalActorFromRequest(c.Request())
 			} else if identityService != nil {
@@ -71,14 +77,44 @@ func controlPortalMiddleware(token string, securitySvc settings.SecurityService,
 				recordControlAuthFailure(c, securitySvc)
 				return httperr.New(httperr.AUTH_INVALID, "invalid control portal credentials")
 			}
-			ctx := context.WithValue(c.Request().Context(), controlPortalActorContextKey{}, actor)
+			ctx := requestctx.WithAuthenticationSecrets(c.Request().Context(), authSecrets...)
+			ctx = context.WithValue(ctx, controlPortalActorContextKey{}, actor)
 			if actorIdentity != "" {
 				ctx = context.WithValue(ctx, controlPortalActorIdentityContextKey{}, actorIdentity)
 			}
+			ctx = requestctx.WithAuthenticationVerified(ctx)
 			c.SetRequest(c.Request().WithContext(ctx))
 			return next(c)
 		}
 	}
+}
+
+func controlPortalPresentedSecrets(req *nethttp.Request) []string {
+	if req == nil {
+		return nil
+	}
+	secrets := make([]string, 0, 4)
+	appendSecret := func(value string) {
+		if strings.TrimSpace(value) == "" {
+			return
+		}
+		for _, existing := range secrets {
+			if existing == value {
+				return
+			}
+		}
+		secrets = append(secrets, value)
+	}
+	appendSecret(req.Header.Get("X-Control-Portal-Token"))
+	auth := strings.TrimSpace(req.Header.Get(echo.HeaderAuthorization))
+	if strings.HasPrefix(auth, "Bearer ") {
+		appendSecret(strings.TrimSpace(strings.TrimPrefix(auth, "Bearer ")))
+	}
+	if cookie, err := req.Cookie(accessservice.ControlSessionCookieName); err == nil {
+		appendSecret(cookie.Value)
+	}
+	appendSecret(req.Header.Get(accessservice.ControlCSRFHeaderName))
+	return secrets
 }
 
 func recordControlAuthFailure(c echo.Context, securitySvc settings.SecurityService) {

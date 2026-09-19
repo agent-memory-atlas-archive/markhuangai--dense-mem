@@ -94,20 +94,20 @@ func newControlPortalServerWithMetricsAndTelemetry(
 		LogMethod:   true,
 		LogURI:      true,
 		LogStatus:   true,
-		LogValuesFunc: func(_ echo.Context, v echomw.RequestLoggerValues) error {
+		LogValuesFunc: func(c echo.Context, v echomw.RequestLoggerValues) error {
 			if logger == nil {
 				return nil
 			}
 			attrs := []httpcontract.LogAttr{
 				httpcontract.String("method", v.Method),
-				httpcontract.String("uri", v.URI),
+				httpcontract.String("uri", requestLogURI(c)),
 				httpcontract.Int("status", v.Status),
 			}
 			if v.Error != nil {
-				logger.Error("control_http_request", errors.New(tools.SanitizeError(v.Error)), attrs...)
+				httpcontract.LogErrorContext(c.Request().Context(), logger, "control_http_request", errors.New(tools.SanitizeError(v.Error)), attrs...)
 				return nil
 			}
-			logger.Info("control_http_request", attrs...)
+			httpcontract.LogInfoContext(c.Request().Context(), logger, "control_http_request", attrs...)
 			return nil
 		},
 	}))

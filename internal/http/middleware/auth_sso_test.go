@@ -13,9 +13,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/markhuangai/dense-mem/internal/crypto"
 	"github.com/markhuangai/dense-mem/internal/domain"
+	"github.com/markhuangai/dense-mem/internal/requestctx"
 )
 
 type stubCredentialVerifier struct {
@@ -95,6 +97,14 @@ func TestAuthMiddlewareRejectsCredentialVerificationAndEntitlementFailures(t *te
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			e := newTestEcho()
+			var observed context.Context
+			e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+				return func(c echo.Context) error {
+					err := next(c)
+					observed = c.Request().Context()
+					return err
+				}
+			})
 			repo := &mockCredentialRepository{getActiveByPrefixFunc: func(context.Context, string) (*domain.Credential, error) {
 				credential := *baseCredential
 				return &credential, nil
@@ -117,6 +127,8 @@ func TestAuthMiddlewareRejectsCredentialVerificationAndEntitlementFailures(t *te
 
 			assert.False(t, handlerCalled)
 			assert.Equal(t, tt.want, rec.Code)
+			require.NotNil(t, observed)
+			assert.Equal(t, []string{rawKey}, requestctx.AuthenticationSecretsFromContext(observed))
 		})
 	}
 }
@@ -125,11 +137,19 @@ func TestAuthMiddleware_SSOSessionFailureIsAuditedAndRecorded(t *testing.T) {
 	e := newTestEcho()
 	mockAudit := &mockAuditService{}
 	mockSecurity := &mockSecurityService{}
+	var observed context.Context
 	authenticator := mockSSOSessionAuthenticator{
 		authenticateFunc: func(ctx context.Context, sessionToken, csrfToken string, requireCSRF bool) (*domain.AuthenticatedActor, error) {
 			return nil, accessservice.ErrSSOAccessDenied
 		},
 	}
+	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			err := next(c)
+			observed = c.Request().Context()
+			return err
+		}
+	})
 	e.Use(AuthMiddlewareWithOptions(&mockCredentialRepository{}, mockAudit, mockSecurity, AuthOptions{
 		SSOSessionAuthenticator: authenticator,
 		AllowMissingCredentials: true,
@@ -154,6 +174,8 @@ func TestAuthMiddleware_SSOSessionFailureIsAuditedAndRecorded(t *testing.T) {
 	assert.Equal(t, "SSO_AUTH_INVALID", mockSecurity.recordAuthFailureReason)
 	assert.Equal(t, "api", mockSecurity.recordAuthFailureSurface)
 	assert.Equal(t, "198.51.100.10", mockSecurity.recordAuthFailureIP)
+	require.NotNil(t, observed)
+	assert.Equal(t, []string{"session-token"}, requestctx.AuthenticationSecretsFromContext(observed))
 }
 
 func TestAuthMiddleware_OptionalMissingCredentialsHasNoFailureSideEffects(t *testing.T) {
@@ -201,6 +223,44 @@ func TestAuthMiddleware_MalformedScopedTeamRecordsAuthFailure(t *testing.T) {
 	assert.Equal(t, "TEAM_PATH_INVALID", mockSecurity.recordAuthFailureReason)
 }
 
+func TestAuthMiddlewareAttachesVerifiedSecretBeforeScopedTeamDenial(t *testing.T) {
+	teamID := uuid.New()
+	requestedTeamID := uuid.New()
+	rawKey := "testprefix12345678901234567890"
+	credential := testCredential(uuid.New(), teamID)
+	credential.KeyHash = "encoded-hash"
+
+	repo := &mockCredentialRepository{getActiveByPrefixFunc: func(context.Context, string) (*domain.Credential, error) {
+		copy := *credential
+		return &copy, nil
+	}}
+	e := newTestEcho()
+	var observed context.Context
+	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			err := next(c)
+			observed = c.Request().Context()
+			return err
+		}
+	})
+	e.Use(AuthMiddlewareWithOptions(repo, nil, nil, AuthOptions{
+		CredentialVerifier:       stubCredentialVerifier{valid: true},
+		CredentialLookupPrefixes: crypto.GetLookupPrefixes,
+	}))
+	e.GET("/teams/:teamId/mcp", func(c echo.Context) error {
+		return c.NoContent(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/"+requestedTeamID.String()+"/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	require.NotNil(t, observed)
+	assert.Equal(t, []string{rawKey}, requestctx.AuthenticationSecretsFromContext(observed))
+}
+
 func TestAuthMiddlewareOAuthBearerSetsImmutablePrincipal(t *testing.T) {
 	teamID := uuid.New()
 	identityID := uuid.New()
@@ -210,6 +270,7 @@ func TestAuthMiddlewareOAuthBearerSetsImmutablePrincipal(t *testing.T) {
 	actor := testSSOActor(teamID, identityID, membershipID, ownerID, &providerID, []string{"read"})
 	actor.Membership.MemorySpaceID = uuid.New()
 	authenticator := &stubOAuthBearerAuthenticator{actor: actor}
+	rawToken := "header.payload.signature"
 	e := newTestEcho()
 	e.Use(AuthMiddlewareWithOptions(&mockCredentialRepository{}, nil, nil, AuthOptions{
 		OAuthBearerAuthenticator: authenticator,
@@ -229,10 +290,10 @@ func TestAuthMiddlewareOAuthBearerSetsImmutablePrincipal(t *testing.T) {
 			{ID: actor.Membership.MemorySpaceID, Kind: domain.MemorySpaceProfilePrivate},
 		}, principal.AllowedSpaces)
 		assert.Empty(t, c.Request().Header.Get("Authorization"))
+		assert.Equal(t, []string{rawToken}, requestctx.AuthenticationSecretsFromContext(c.Request().Context()))
 		return c.NoContent(http.StatusOK)
 	})
 
-	rawToken := "header.payload.signature"
 	req := httptest.NewRequest(http.MethodGet, "/teams/"+teamID.String()+"/mcp", nil)
 	req.Header.Set("Authorization", "Bearer "+rawToken)
 	rec := httptest.NewRecorder()
@@ -266,7 +327,15 @@ func TestAuthMiddlewareOAuthBearerMapsBoundedErrors(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			audit := &mockAuditService{}
 			security := &mockSecurityService{}
+			var observed context.Context
 			e := newTestEcho()
+			e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+				return func(c echo.Context) error {
+					err := next(c)
+					observed = c.Request().Context()
+					return err
+				}
+			})
 			e.Use(AuthMiddlewareWithOptions(&mockCredentialRepository{}, audit, security, AuthOptions{
 				OAuthBearerAuthenticator: &stubOAuthBearerAuthenticator{err: test.err},
 			}))
@@ -281,6 +350,8 @@ func TestAuthMiddlewareOAuthBearerMapsBoundedErrors(t *testing.T) {
 			assert.True(t, audit.authFailureCalled)
 			assert.Equal(t, "oauth", audit.authFailureParams.entityType)
 			assert.Equal(t, test.wantSecurityFailure, security.recordAuthFailureCalled)
+			require.NotNil(t, observed)
+			assert.Equal(t, []string{"header.payload.signature"}, requestctx.AuthenticationSecretsFromContext(observed))
 		})
 	}
 }
@@ -374,6 +445,43 @@ func TestAuthMiddlewareStaticCredentialMustMatchScopedTeam(t *testing.T) {
 			assert.Equal(t, test.wantStatus, rec.Code)
 		})
 	}
+}
+
+func TestAuthMiddlewareScopedTeamMismatchRetainsVerifiedActorWithoutPrincipal(t *testing.T) {
+	credentialTeamID := uuid.New()
+	credentialID := uuid.New()
+	otherTeamID := uuid.New()
+	rawKey := "testprefix12345678901234567890"
+	credential := testCredential(credentialID, credentialTeamID)
+	credential.KeyHash = "encoded-hash"
+	credential.KeyPrefix = crypto.GetKeyPrefix(rawKey)
+
+	e := newTestEcho()
+	var observed context.Context
+	e.HTTPErrorHandler = func(_ error, c echo.Context) {
+		observed = c.Request().Context()
+		_ = c.NoContent(http.StatusForbidden)
+	}
+	e.Use(AuthMiddlewareWithOptions(&mockCredentialRepository{getActiveByPrefixFunc: func(context.Context, string) (*domain.Credential, error) {
+		copy := *credential
+		return &copy, nil
+	}}, nil, nil, AuthOptions{
+		CredentialVerifier:       stubCredentialVerifier{valid: true},
+		CredentialLookupPrefixes: crypto.GetLookupPrefixes,
+	}))
+	e.GET("/teams/:teamId/mcp", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+
+	request := httptest.NewRequest(http.MethodGet, "/teams/"+otherTeamID.String()+"/mcp", nil)
+	request.Header.Set("Authorization", "Bearer "+rawKey)
+	response := httptest.NewRecorder()
+	e.ServeHTTP(response, request)
+
+	assert.Equal(t, http.StatusForbidden, response.Code)
+	actor, ok := requestctx.ActorFromContext(observed)
+	require.True(t, ok)
+	assert.Equal(t, credentialTeamID, actor.TeamID)
+	assert.True(t, requestctx.AuthenticationVerifiedFromContext(observed))
+	assert.Nil(t, GetPrincipal(observed))
 }
 
 func TestAuthMiddlewareOAuthOnlyRejectsBrowserCookies(t *testing.T) {

@@ -4,7 +4,7 @@ import { ControlApi, OperationLog, OperationLogQuery, Team } from "../api";
 import { LoadingState, SectionHeading } from "../ui/components";
 import { formatDate, readError, shortId } from "./utils";
 
-const SEVERITIES = ["", "DEBUG", "INFO", "WARN", "ERROR"];
+const SEVERITIES = ["", "TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"];
 const PAGE_SIZES = [25, 50, 100, 250, 500];
 const DETAIL_KEYS = [
   "route",
@@ -257,11 +257,13 @@ export function LogsPanel({ api, teams }: { api: ControlApi; teams: Team[] }) {
 
 function severityClass(severity: string): string {
   switch (severity) {
+    case "FATAL":
     case "ERROR":
       return "status-pill error";
     case "WARN":
       return "status-pill warning";
     case "DEBUG":
+    case "TRACE":
       return "status-pill neutral";
     default:
       return "status-pill";
