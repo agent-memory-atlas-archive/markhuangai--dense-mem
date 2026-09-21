@@ -18,6 +18,7 @@ import (
 	"github.com/markhuangai/dense-mem/internal/modelprovider"
 	"github.com/markhuangai/dense-mem/internal/observability"
 	rememberapp "github.com/markhuangai/dense-mem/internal/remember/service"
+	"github.com/markhuangai/dense-mem/internal/requestctx"
 )
 
 func TestInlineEmbeddingResultsFromDocumentsCopiesPlanMetadataAndVectors(t *testing.T) {
@@ -139,11 +140,11 @@ func TestRememberFailureLoggingFallbackProtectsRequestSecrets(t *testing.T) {
 	require.Len(t, logger.errorTexts, 3)
 	for _, text := range logger.errorTexts {
 		require.NotContains(t, text, secret)
-		require.Contains(t, text, observability.CredentialProtectionRedacted)
+		require.Equal(t, "[diagnostic unavailable]", text)
 	}
 	require.Len(t, logger.warnTexts, 1)
 	require.NotContains(t, logger.warnTexts[0], secret)
-	require.Contains(t, logger.warnTexts[0], observability.CredentialProtectionRedacted)
+	require.Equal(t, "[diagnostic unavailable]", logger.warnTexts[0])
 }
 
 func TestRememberProcessorPreCallbackLockFailurePreservesCancellationCode(t *testing.T) {
@@ -303,12 +304,14 @@ func TestRememberProcessorCommitsValidatedAssessmentAndResult(t *testing.T) {
 		catalog:  &processorAssessmentCatalogStub{},
 		provider: &processorAssessmentProviderStub{},
 	}
-	status, err := processor.ProcessRemember(context.Background(), input)
+	ctx := requestctx.WithRememberInvocationIDSink(context.Background())
+	status, err := processor.ProcessRemember(ctx, input)
 	require.NoError(t, err)
 	require.Equal(t, "committed", status.SubmissionID)
 	require.Equal(t, "completed", status.ProcessingState)
 	require.Equal(t, "evaluated_zero", ledger.invocation.Outcome)
 	require.Equal(t, "execution", ledger.invocation.Classification)
+	require.NotEmpty(t, requestctx.RememberInvocationIDFromContext(ctx))
 }
 
 func TestRememberProcessorRecordsAssessmentRejectionTrails(t *testing.T) {
@@ -479,11 +482,13 @@ func TestRememberProcessingFailureLoggingUsesRequestAuthenticationSecrets(t *tes
 }
 
 type rememberFailureLogSink struct {
-	records []observability.LogRecord
+	records       []observability.LogRecord
+	contextErrors []error
 }
 
-func (s *rememberFailureLogSink) WriteLog(_ context.Context, record observability.LogRecord) error {
+func (s *rememberFailureLogSink) WriteLog(ctx context.Context, record observability.LogRecord) error {
 	s.records = append(s.records, record)
+	s.contextErrors = append(s.contextErrors, ctx.Err())
 	return nil
 }
 

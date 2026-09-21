@@ -38,19 +38,31 @@ const DETAIL_KEYS = [
   "userinfo_claim_count",
   "status",
   "latency",
+  "delivery_stage",
 ];
 const RAW_DUPLICATE_KEYS = new Set(["time", "timestamp", "level", "severity", "msg", "message"]);
+const EMPTY_LOG_QUERY: OperationLogQuery = {};
+const FREE_TEXT_FILTER_DEBOUNCE_MS = 300;
 
-export function LogsPanel({ api, teams }: { api: ControlApi; teams: Team[] }) {
+export function LogsPanel({ api, teams, initialQuery = EMPTY_LOG_QUERY }: { api: ControlApi; teams: Team[]; initialQuery?: OperationLogQuery }) {
   const [logs, setLogs] = useState<OperationLog[]>([]);
   const [total, setTotal] = useState(0);
-  const [query, setQuery] = useState<OperationLogQuery>({ limit: 100, offset: 0, sort: "timestamp", direction: "desc" });
+  const [query, setQuery] = useState<OperationLogQuery>({ limit: 100, offset: 0, sort: "timestamp", direction: "desc", ...initialQuery });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [expandedLogId, setExpandedLogId] = useState("");
   const requestSeqRef = useRef(0);
+  const freeTextFilterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function clearFreeTextFilterTimer() {
+    if (freeTextFilterTimerRef.current !== null) {
+      clearTimeout(freeTextFilterTimerRef.current);
+      freeTextFilterTimerRef.current = null;
+    }
+  }
 
   async function loadLogs(nextQuery = query) {
+    clearFreeTextFilterTimer();
     const requestSeq = requestSeqRef.current + 1;
     requestSeqRef.current = requestSeq;
     setLoading(true);
@@ -75,9 +87,20 @@ export function LogsPanel({ api, teams }: { api: ControlApi; teams: Team[] }) {
     }
   }
 
+  function scheduleFreeTextLoad(nextQuery: OperationLogQuery) {
+    clearFreeTextFilterTimer();
+    requestSeqRef.current += 1;
+    freeTextFilterTimerRef.current = setTimeout(() => {
+      freeTextFilterTimerRef.current = null;
+      void loadLogs(nextQuery);
+    }, FREE_TEXT_FILTER_DEBOUNCE_MS);
+  }
+
   useEffect(() => {
-    void loadLogs();
-  }, []);
+    void loadLogs({ limit: 100, offset: 0, sort: "timestamp", direction: "desc", ...initialQuery });
+  }, [initialQuery]);
+
+  useEffect(() => clearFreeTextFilterTimer, []);
 
   const teamNames = new Map(teams.map((team) => [team.id, team.name]));
   const offset = query.offset ?? 0;
@@ -139,6 +162,89 @@ export function LogsPanel({ api, teams }: { api: ControlApi; teams: Team[] }) {
           >
             <option value="desc">Desc</option>
             <option value="asc">Asc</option>
+          </select>
+        </label>
+        <label>
+          Correlation
+          <input
+            aria-label="Correlation ID"
+            value={query.correlation_id ?? ""}
+            onChange={(event) => {
+              const next = { ...query, correlation_id: event.target.value, offset: 0 };
+              setQuery(next);
+              scheduleFreeTextLoad(next);
+            }}
+          />
+        </label>
+        <label>
+          Request hash
+          <input
+            aria-label="Request hash"
+            value={query.request_hash ?? ""}
+            onChange={(event) => {
+              const next = { ...query, request_hash: event.target.value, offset: 0 };
+              setQuery(next);
+              scheduleFreeTextLoad(next);
+            }}
+          />
+        </label>
+        <label>
+          Invocation
+          <input
+            aria-label="Invocation ID"
+            value={query.invocation_id ?? ""}
+            onChange={(event) => {
+              const next = { ...query, invocation_id: event.target.value, offset: 0 };
+              setQuery(next);
+              scheduleFreeTextLoad(next);
+            }}
+          />
+        </label>
+        <label>
+          Attempt
+          <input
+            aria-label="Attempt ID"
+            value={query.attempt_id ?? ""}
+            onChange={(event) => {
+              const next = { ...query, attempt_id: event.target.value, offset: 0 };
+              setQuery(next);
+              scheduleFreeTextLoad(next);
+            }}
+          />
+        </label>
+        <label>
+          Call kind
+          <select
+            aria-label="Call classification"
+            value={query.classification ?? ""}
+            onChange={(event) => {
+              const next = { ...query, classification: event.target.value as OperationLogQuery["classification"], offset: 0 };
+              setQuery(next);
+              void loadLogs(next);
+            }}
+          >
+            <option value="">All calls</option>
+            <option value="execution">Execution</option>
+            <option value="replay">Replay</option>
+            <option value="conflict">Conflict</option>
+          </select>
+        </label>
+        <label>
+          Retryable
+          <select
+            aria-label="Retryable"
+            value={query.retryable === "" || query.retryable === undefined ? "" : String(query.retryable)}
+            onChange={(event) => {
+              const raw = event.target.value;
+              const retryable: OperationLogQuery["retryable"] = raw === "" ? "" : raw === "true";
+              const next = { ...query, retryable, offset: 0 };
+              setQuery(next);
+              void loadLogs(next);
+            }}
+          >
+            <option value="">Any</option>
+            <option value="true">Yes</option>
+            <option value="false">No</option>
           </select>
         </label>
       </div>

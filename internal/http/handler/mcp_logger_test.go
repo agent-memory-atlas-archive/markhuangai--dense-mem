@@ -91,7 +91,7 @@ func TestNewMCPLoggerNilIsSafe(t *testing.T) {
 	}
 }
 
-func TestMCPLoggerAdapterRoutesAllLevelsAndContextFallbacks(t *testing.T) {
+func TestMCPLoggerAdapterRoutesLevelsWithoutContextFallbacks(t *testing.T) {
 	var output bytes.Buffer
 	logger := observability.NewWithHandler(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	adapted := NewMCPLogger(mcpTestLogger{delegate: logger}).(mcpLoggerAdapter)
@@ -111,10 +111,7 @@ func TestMCPLoggerAdapterRoutesAllLevelsAndContextFallbacks(t *testing.T) {
 	adapted.Fatal("fatal", field)
 	adapted.FatalContext(ctx, "fatal-context", field)
 
-	for _, message := range []string{
-		"trace", "debug", "info", "warn", "error", "trace-context", "debug-context",
-		"info-context", "warn-context", "error-context", "fatal", "fatal-context",
-	} {
+	for _, message := range []string{"trace", "debug", "info", "warn", "error", "warn-context", "fatal"} {
 		if !strings.Contains(output.String(), `"msg":"`+message+`"`) {
 			t.Fatalf("adapter output missing %q: %s", message, output.String())
 		}
@@ -185,14 +182,45 @@ func TestMCPLoggerAdapterUsesOptionalContextualSurface(t *testing.T) {
 	adapted.ErrorContext(ctx, "error-context", errors.New("failure"), field)
 	adapted.Fatal("fatal", field)
 	adapted.FatalContext(ctx, "fatal-context", field)
-	adapted.mcpLogContextFallback(ctx, "debug", "debug-fallback", field)
-	adapted.mcpLogContextFallback(ctx, "other", "info-fallback", field)
 
 	for _, message := range []string{
 		"trace", "warn-context", "trace-context", "debug-context", "info-context",
-		"error-context", "fatal", "fatal-context", "debug-fallback", "info-fallback",
+		"error-context", "fatal", "fatal-context",
 	} {
 		require.Contains(t, logger.events, message)
 	}
-	require.Len(t, logger.contexts, 7)
+	require.Len(t, logger.contexts, 6)
+}
+
+type baseMCPLogger struct{ events []string }
+
+func (l *baseMCPLogger) Info(message string, _ ...httpcontract.LogAttr) {
+	l.events = append(l.events, message)
+}
+func (l *baseMCPLogger) Error(message string, _ error, _ ...httpcontract.LogAttr) {
+	l.events = append(l.events, message)
+}
+func (l *baseMCPLogger) Warn(message string, _ ...httpcontract.LogAttr) {
+	l.events = append(l.events, message)
+}
+func (l *baseMCPLogger) Debug(message string, _ ...httpcontract.LogAttr) {
+	l.events = append(l.events, message)
+}
+func (l *baseMCPLogger) With(_ ...httpcontract.LogAttr) httpcontract.LogProvider { return l }
+
+func TestMCPLoggerAdapterFallsBackForBaseLoggerContextMethods(t *testing.T) {
+	logger := &baseMCPLogger{}
+	adapted := NewMCPLogger(logger).(mcpLoggerAdapter)
+	ctx := context.Background()
+
+	adapted.WarnContext(ctx, "warn-context")
+	adapted.TraceContext(ctx, "trace-context")
+	adapted.DebugContext(ctx, "debug-context")
+	adapted.InfoContext(ctx, "info-context")
+	adapted.ErrorContext(ctx, "error-context", errors.New("failure"))
+	adapted.FatalContext(ctx, "fatal-context")
+
+	require.Equal(t, []string{
+		"warn-context", "trace-context", "debug-context", "info-context", "error-context", "fatal-context",
+	}, logger.events)
 }

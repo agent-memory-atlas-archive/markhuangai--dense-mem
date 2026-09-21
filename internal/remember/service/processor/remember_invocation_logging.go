@@ -10,6 +10,7 @@ import (
 	"github.com/markhuangai/dense-mem/internal/modelprovider"
 	"github.com/markhuangai/dense-mem/internal/observability"
 	rememberapp "github.com/markhuangai/dense-mem/internal/remember/service"
+	"github.com/markhuangai/dense-mem/internal/requestctx"
 )
 
 type rememberInvocationWriter interface {
@@ -37,6 +38,7 @@ func (p *rememberSynchronousProcessor) recordRememberInvocation(
 	if p == nil || p.ledger == nil {
 		return
 	}
+	requestctx.SetRememberInvocationID(ctx, invocationID)
 	writer, ok := p.ledger.(rememberInvocationWriter)
 	if !ok {
 		return
@@ -144,10 +146,9 @@ func (p *rememberSynchronousProcessor) recordRememberInvocation(
 			observability.String("invocation_id", invocationID),
 		}
 		if contextual, ok := p.logger.(observability.ContextLogProvider); ok {
-			contextual.WarnContext(ctx, warningEvent, append(warningAttrs, observability.String("error", err.Error()))...)
+			contextual.WarnContext(writeCtx, warningEvent, append(warningAttrs, observability.String("error", err.Error()))...)
 		} else {
-			protectedError := protectRememberLogError(err, p.protector, observability.AuthenticationSecretsFromContext(ctx))
-			p.logger.Warn(warningEvent, append(warningAttrs, observability.String("error", protectedError.Error()))...)
+			p.logger.Warn(warningEvent, append(warningAttrs, observability.String("error", "[diagnostic unavailable]"))...)
 		}
 	}
 	if p.logger != nil {
@@ -155,6 +156,7 @@ func (p *rememberSynchronousProcessor) recordRememberInvocation(
 			observability.String("invocation_id", invocationID),
 			observability.String("classification", classification),
 			observability.String("outcome", outcome),
+			observability.Bool("retryable", retryable),
 			observability.String("phase", phase),
 			observability.String("canonical_attempt_id", canonicalAttemptID),
 			observability.String("request_hash", input.RequestHash),
@@ -171,13 +173,13 @@ func (p *rememberSynchronousProcessor) recordRememberInvocation(
 				logErr = errors.New("remember invocation completed with an error outcome")
 			}
 			if contextual, ok := p.logger.(observability.ContextLogProvider); ok {
-				contextual.ErrorContext(ctx, "remember_invocation_completed", logErr, attrs...)
+				contextual.ErrorContext(writeCtx, "remember_invocation_completed", logErr, attrs...)
 			} else {
-				p.logger.Error("remember_invocation_completed", protectRememberLogError(logErr, p.protector, observability.AuthenticationSecretsFromContext(ctx)), attrs...)
+				p.logger.Error("remember_invocation_completed", errors.New("[diagnostic unavailable]"), attrs...)
 			}
 		default:
 			if contextual, ok := p.logger.(observability.ContextLogProvider); ok {
-				contextual.InfoContext(ctx, "remember_invocation_completed", attrs...)
+				contextual.InfoContext(writeCtx, "remember_invocation_completed", attrs...)
 			} else {
 				p.logger.Info("remember_invocation_completed", attrs...)
 			}
