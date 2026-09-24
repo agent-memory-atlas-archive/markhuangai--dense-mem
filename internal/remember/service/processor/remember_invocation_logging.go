@@ -34,13 +34,9 @@ func (p *rememberSynchronousProcessor) recordRememberInvocation(
 	cause error,
 	status *rememberapp.SubmissionStatusResult,
 	exchanges []modelprovider.ProviderExchange,
+	recoveredAttempt ...bool,
 ) {
 	if p == nil || p.ledger == nil {
-		return
-	}
-	requestctx.SetRememberInvocationID(ctx, invocationID)
-	writer, ok := p.ledger.(rememberInvocationWriter)
-	if !ok {
 		return
 	}
 	if status == nil {
@@ -48,6 +44,27 @@ func (p *rememberSynchronousProcessor) recordRememberInvocation(
 		if errors.As(cause, &processErr) {
 			status = processErr.Status
 		}
+	}
+	outcome := rememberInvocationMetricOutcome(classification, cause, status)
+	diagnosticClassification := classification
+	if diagnosticClassification == "recovery" {
+		diagnosticClassification = "execution"
+	}
+	observability.RecordLogicalOperation(p.metrics, "remember", classification, outcome, rememberInvocationDuration(input.InvocationStartedAt))
+	isRecovery := classification == "recovery" || (len(recoveredAttempt) > 0 && recoveredAttempt[0])
+	if isRecovery {
+		recoveryOutcome := "succeeded"
+		if outcome == "failed" || outcome == "conflict" {
+			recoveryOutcome = "failed"
+		} else if outcome == "cancelled" {
+			recoveryOutcome = "cancelled"
+		}
+		observability.RecordLogicalRecovery(p.metrics, "remember", recoveryOutcome)
+	}
+	requestctx.SetRememberInvocationID(ctx, invocationID)
+	writer, ok := p.ledger.(rememberInvocationWriter)
+	if !ok {
+		return
 	}
 	publicResult := map[string]any{}
 	if status != nil {
@@ -86,24 +103,6 @@ func (p *rememberSynchronousProcessor) recordRememberInvocation(
 			callerCaptureState, callerCaptureReason = item.CaptureState, item.CaptureReason
 		}
 	}
-	outcome := "completed"
-	if cause != nil {
-		outcome = "failed"
-	}
-	if status != nil && len(status.Errors) > 0 {
-		outcome = "failed"
-	}
-	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) ||
-		errors.Is(cause, rememberapp.ErrRememberRequestCancelled) || errors.Is(cause, rememberapp.ErrRememberRequestTimeout) {
-		outcome = "cancelled"
-	} else if outcome == "completed" && classification == "replay" {
-		outcome = "replayed"
-	} else if outcome == "completed" && status != nil && len(status.RelationshipResults) == 0 {
-		outcome = "evaluated_zero"
-	}
-	if classification == "conflict" && (outcome == "completed" || outcome == "evaluated_zero" || errors.Is(cause, rememberapp.ErrRememberConflict) || errors.Is(cause, repository.ErrIdempotencyConflict)) {
-		outcome = "conflict"
-	}
 	errorCode := ""
 	retryable := false
 	if status != nil && len(status.Errors) > 0 {
@@ -122,7 +121,7 @@ func (p *rememberSynchronousProcessor) recordRememberInvocation(
 		TeamID: input.TeamID, OwnerProfileID: input.OwnerProfileID, InvocationID: invocationID,
 		CanonicalAttemptID: canonicalAttemptID, SpaceID: input.SpaceID, SpaceGeneration: input.SpaceGeneration,
 		RequestHash: input.RequestHash, CorrelationID: rememberProcessCorrelationID(input.Metadata),
-		Classification: classification, Outcome: outcome, FailedPhase: failedPhase, ErrorCode: errorCode,
+		Classification: diagnosticClassification, Outcome: outcome, FailedPhase: failedPhase, ErrorCode: errorCode,
 		Retryable: retryable, RequestBody: requestBody, RequestCaptureState: requestCaptureState, RequestCaptureReason: requestCaptureReason,
 		ProviderExchanges: providerExchanges, CallerResponse: callerBody,
 		CallerResponseCaptureState: callerCaptureState, CallerResponseCaptureReason: callerCaptureReason,
@@ -185,6 +184,27 @@ func (p *rememberSynchronousProcessor) recordRememberInvocation(
 			}
 		}
 	}
+}
+
+func rememberInvocationMetricOutcome(classification string, cause error, status *rememberapp.SubmissionStatusResult) string {
+	outcome := "completed"
+	if cause != nil || (status != nil && len(status.Errors) > 0) {
+		outcome = "failed"
+	}
+	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) ||
+		errors.Is(cause, rememberapp.ErrRememberRequestCancelled) || errors.Is(cause, rememberapp.ErrRememberRequestTimeout) {
+		return "cancelled"
+	}
+	if classification == "conflict" && (outcome == "completed" || outcome == "failed" || errors.Is(cause, rememberapp.ErrRememberConflict)) {
+		return "conflict"
+	}
+	if outcome == "completed" && classification == "replay" {
+		return "replayed"
+	}
+	if outcome == "completed" && status != nil && len(status.RelationshipResults) == 0 {
+		return "evaluated_zero"
+	}
+	return outcome
 }
 
 func rememberInvocationDuration(started time.Time) time.Duration {

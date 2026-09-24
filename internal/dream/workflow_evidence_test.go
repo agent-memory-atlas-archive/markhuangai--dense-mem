@@ -12,6 +12,7 @@ import (
 	"github.com/markhuangai/dense-mem/internal/domain"
 	dreamcontract "github.com/markhuangai/dense-mem/internal/dream/contract"
 	"github.com/markhuangai/dense-mem/internal/modelprovider"
+	"github.com/markhuangai/dense-mem/internal/observability"
 )
 
 func TestScheduledEvidenceCycleBoundsTargetsContextsAndRelatedRecords(t *testing.T) {
@@ -141,11 +142,13 @@ func TestScheduledEvidenceCycleAcceptsMidHourAndSkipsDisabledWindows(t *testing.
 func TestRecoverScheduledEvidenceCycleCompletesDisabledRun(t *testing.T) {
 	teamID := uuid.NewString()
 	leaseToken := uuid.NewString()
+	metrics := observability.NewPrometheusMetrics()
 	store := &dreamRepositoryStub{recoveryRun: &dreamcontract.DreamCycleRun{
 		TeamID: teamID, RunID: uuid.NewString(), LeaseToken: leaseToken, Status: "running", Claimed: true,
 	}}
 	service := New(Dependencies{
 		Store: store, ScheduledStore: store,
+		Metrics:   metrics,
 		AppConfig: cycleAppConfigStub{cfg: domain.DreamingRuntimeConfig{Enabled: false, MaxOutputs: 5, Timezone: "UTC", StartTimeLocal: "03:00"}},
 	}).(*service)
 	result, err := service.RecoverScheduledEvidenceCycle(context.Background(), teamID)
@@ -153,6 +156,9 @@ func TestRecoverScheduledEvidenceCycleCompletesDisabledRun(t *testing.T) {
 	require.NotNil(t, result)
 	require.Equal(t, "cancelled", result.Status)
 	require.Equal(t, "cancelled", store.completeInput.Status)
+	metricText := dreamMetricsText(t, metrics)
+	require.Contains(t, metricText, `densemem_logical_operation_recoveries_total{operation="dream_evidence",outcome="attempted"} 1`)
+	require.Contains(t, metricText, `densemem_logical_operation_recoveries_total{operation="dream_evidence",outcome="cancelled"} 1`)
 }
 
 func TestEvidenceTeamActivityDefaultsAndRejectsArchivedTeams(t *testing.T) {
@@ -363,17 +369,25 @@ func TestRecoverScheduledEvidenceCycleHandlesMissingStoreRecoveryAndTeamErrors(t
 	require.ErrorContains(t, err, "scheduled dream repository is required")
 
 	store := &dreamRepositoryStub{recoveryErr: errors.New("recovery failed")}
-	svc = New(Dependencies{ScheduledStore: store, AppConfig: cycleAppConfigStub{cfg: domain.DreamingRuntimeConfig{Enabled: true, MaxOutputs: 5, Timezone: "UTC", StartTimeLocal: "03:00"}}}).(*service)
+	metrics := observability.NewPrometheusMetrics()
+	svc = New(Dependencies{ScheduledStore: store, Metrics: metrics, AppConfig: cycleAppConfigStub{cfg: domain.DreamingRuntimeConfig{Enabled: true, MaxOutputs: 5, Timezone: "UTC", StartTimeLocal: "03:00"}}}).(*service)
 	_, err = svc.RecoverScheduledEvidenceCycle(context.Background(), "not-a-uuid")
 	require.Error(t, err)
 	_, err = svc.RecoverScheduledEvidenceCycle(context.Background(), teamID)
 	require.ErrorContains(t, err, "recovery failed")
+	metricText := dreamMetricsText(t, metrics)
+	require.Contains(t, metricText, `densemem_logical_operation_recoveries_total{operation="dream_evidence",outcome="attempted"} 1`)
+	require.Contains(t, metricText, `densemem_logical_operation_recoveries_total{operation="dream_evidence",outcome="failed"} 1`)
 
 	store = &dreamRepositoryStub{}
-	svc = New(Dependencies{ScheduledStore: store, AppConfig: cycleAppConfigStub{cfg: domain.DreamingRuntimeConfig{Enabled: true, MaxOutputs: 5, Timezone: "UTC", StartTimeLocal: "03:00"}}}).(*service)
+	metrics = observability.NewPrometheusMetrics()
+	svc = New(Dependencies{ScheduledStore: store, Metrics: metrics, AppConfig: cycleAppConfigStub{cfg: domain.DreamingRuntimeConfig{Enabled: true, MaxOutputs: 5, Timezone: "UTC", StartTimeLocal: "03:00"}}}).(*service)
 	result, err := svc.RecoverScheduledEvidenceCycle(context.Background(), teamID)
 	require.NoError(t, err)
 	require.Nil(t, result)
+	metricText = dreamMetricsText(t, metrics)
+	require.Contains(t, metricText, `densemem_logical_operation_recoveries_total{operation="dream_evidence",outcome="attempted"} 0`)
+	require.Contains(t, metricText, `densemem_logical_operation_recoveries_total{operation="dream_evidence",outcome="failed"} 0`)
 
 	svc.deps.Teams = &errorTeamServiceStub{err: errors.New("team lookup failed")}
 	_, err = svc.evidenceTeamIsActive(context.Background(), teamID)

@@ -10,6 +10,7 @@ import (
 
 	"github.com/markhuangai/dense-mem/internal/domain"
 	dreamcontract "github.com/markhuangai/dense-mem/internal/dream/contract"
+	"github.com/markhuangai/dense-mem/internal/observability"
 	rememberapp "github.com/markhuangai/dense-mem/internal/remember/service"
 )
 
@@ -465,7 +466,8 @@ func TestResolveFeedbackPreservesNonRetryablePolicyGuidance(t *testing.T) {
 	}}
 	remember := &rememberServiceStub{result: dreamTerminalRememberResult(string(rememberapp.TerminalProcessingFailed), attemptID)}
 	remember.result.Terminal.Errors = []rememberapp.SubmissionStatusError{rememberapp.TerminalStatusError(rememberapp.TerminalErrorPolicyRejected)}
-	svc := New(Dependencies{Store: repo, Remember: remember})
+	metrics := observability.NewPrometheusMetrics()
+	svc := New(Dependencies{Store: repo, Remember: remember, Metrics: metrics})
 
 	result, err := svc.ResolveFeedback(dreamTestContext(teamID, ownerID), "ignored-profile", ResolveFeedbackRequest{
 		DreamID: hypothesisID, Decision: "confirm_true",
@@ -476,6 +478,9 @@ func TestResolveFeedbackPreservesNonRetryablePolicyGuidance(t *testing.T) {
 	require.Equal(t, string(rememberapp.TerminalNextActionResubmitRemember), result.Memory.Terminal.Errors[0].NextAction)
 	require.NotContains(t, result.Memory.Terminal.Errors[0].Remediation, "resolve_dream_feedback")
 	require.NotContains(t, result.Memory.Terminal.Errors[0].Remediation, attemptID)
+	metricText := dreamMetricsText(t, metrics)
+	require.Contains(t, metricText, `densemem_logical_operation_attempts_total{classification="confirmation",operation="dream_confirmation",outcome="failed"} 1`)
+	require.Contains(t, metricText, `densemem_logical_operation_attempts_total{classification="confirmation",operation="dream_confirmation",outcome="completed"} 0`)
 }
 
 func TestResolveFeedbackUsesCanonicalDreamIDForDefaultRetryKey(t *testing.T) {
@@ -582,15 +587,78 @@ func TestResolveFeedbackReplaysAliasWithLegacyDefaultKey(t *testing.T) {
 func TestResolveFeedbackWrapsConfirmationBusyWithTypedError(t *testing.T) {
 	teamID := uuid.New()
 	ownerID := uuid.New()
-	svc := New(Dependencies{Store: &dreamRepositoryStub{confirmationLockErr: dreamcontract.ErrDreamConfirmationBusy}})
+	for _, decision := range []string{"confirm_true", "reject"} {
+		t.Run(decision, func(t *testing.T) {
+			hypothesisID := uuid.NewString()
+			metrics := observability.NewInMemoryDiscoverabilityMetrics()
+			svc := New(Dependencies{
+				Store: &dreamRepositoryStub{
+					getRecord: dreamcontract.HypothesisRecord{
+						TeamID:             teamID.String(),
+						HypothesisID:       hypothesisID,
+						CreatedByProfileID: ownerID.String(),
+						Status:             string(domain.DreamStatusProposed),
+						Statement:          "Dense-Mem may use PostgreSQL.",
+					},
+					confirmationLockErr: dreamcontract.ErrDreamConfirmationBusy,
+				},
+				Metrics: metrics,
+			})
 
-	_, err := svc.ResolveFeedback(dreamTestContext(teamID, ownerID), "ignored-profile", ResolveFeedbackRequest{
-		DreamID: uuid.NewString(), Decision: "confirm_true",
-		Evidence: []rememberapp.RememberEvidenceInput{{Content: "Independent deployment evidence."}},
-	})
-	var busy *ConfirmationBusyError
-	require.ErrorAs(t, err, &busy)
-	require.ErrorIs(t, err, dreamcontract.ErrDreamConfirmationBusy)
+			_, err := svc.ResolveFeedback(dreamTestContext(teamID, ownerID), "ignored-profile", ResolveFeedbackRequest{
+				DreamID:  hypothesisID,
+				Decision: decision,
+				Evidence: []rememberapp.RememberEvidenceInput{{Content: "Independent deployment evidence."}},
+			})
+			var busy *ConfirmationBusyError
+			require.ErrorAs(t, err, &busy)
+			require.ErrorIs(t, err, dreamcontract.ErrDreamConfirmationBusy)
+
+			samples := metrics.DreamFeedbackSamples()
+			require.Len(t, samples, 1)
+			require.Equal(t, decision, samples[0].Decision)
+			require.Equal(t, "error", samples[0].Outcome)
+		})
+	}
+}
+
+func TestResolveFeedbackRecordsNonBusyLockAcquisitionErrors(t *testing.T) {
+	teamID := uuid.New()
+	ownerID := uuid.New()
+	for _, decision := range []string{"confirm_true", "reject"} {
+		t.Run(decision, func(t *testing.T) {
+			hypothesisID := uuid.NewString()
+			lockErr := errors.New("confirmation database unavailable")
+			metrics := observability.NewInMemoryDiscoverabilityMetrics()
+			svc := New(Dependencies{
+				Store: &dreamRepositoryStub{
+					getRecord: dreamcontract.HypothesisRecord{
+						TeamID:             teamID.String(),
+						HypothesisID:       hypothesisID,
+						CreatedByProfileID: ownerID.String(),
+						Status:             string(domain.DreamStatusProposed),
+						Statement:          "Dense-Mem may use PostgreSQL.",
+					},
+					confirmationLockErr: lockErr,
+				},
+				Metrics: metrics,
+			})
+
+			_, err := svc.ResolveFeedback(dreamTestContext(teamID, ownerID), "ignored-profile", ResolveFeedbackRequest{
+				DreamID:  hypothesisID,
+				Decision: decision,
+				Evidence: []rememberapp.RememberEvidenceInput{{Content: "Independent deployment evidence."}},
+			})
+			require.ErrorIs(t, err, lockErr)
+			var busy *ConfirmationBusyError
+			require.False(t, errors.As(err, &busy))
+
+			samples := metrics.DreamFeedbackSamples()
+			require.Len(t, samples, 1)
+			require.Equal(t, decision, samples[0].Decision)
+			require.Equal(t, "error", samples[0].Outcome)
+		})
+	}
 }
 
 func dreamTerminalRememberResult(state, submissionID string) *rememberapp.RememberResult {
