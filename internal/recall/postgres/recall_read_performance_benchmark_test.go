@@ -262,6 +262,15 @@ func newReadPerformanceBenchmarkFixture(b *testing.B) *readPerformanceBenchmarkF
 		}
 		return tx.Exec("ANALYZE search_documents, evidence_fragments").Error
 	}))
+	lexical, err := store.RecallEvidence(baseCtx, RecallEvidenceInput{
+		TeamID: teamID, Query: "recall benchmark lexical marker", Limit: 10,
+	})
+	require.NoError(b, err)
+	selectedSupport := false
+	for _, hit := range lexical.Results {
+		selectedSupport = selectedSupport || hit.EvidenceID == baseDocuments.fragments[0].FragmentID
+	}
+	require.False(b, selectedSupport, "benchmark relationship-support fragment must stay outside lexical results")
 
 	return &readPerformanceBenchmarkFixture{
 		store: store, teamID: teamID, ownerID: ownerID, annTeamID: annTeamID, annOwnerID: annOwnerID,
@@ -291,7 +300,7 @@ func createReadPerformanceBenchmarkDocuments(
 	for index := range evidence {
 		content := fmt.Sprintf("%s deterministic evidence record %04d", prefix, index)
 		if index == 0 && prefix == "recall benchmark lexical marker" {
-			content = "Benchmark Reader works on Dense Mem. " + content
+			content = "Benchmark Reader works on Dense Mem. Relationship support evidence record 0000"
 		}
 		evidence[index] = knowledgepostgres.EvidenceInput{Content: content, SourceType: "document"}
 	}
@@ -321,6 +330,7 @@ type readPerformanceBenchmarkCounters struct {
 	transactions atomic.Int64
 	commits      atomic.Int64
 	rollbacks    atomic.Int64
+	capture      *projectionQueryCapture
 }
 
 type readPerformanceBenchmarkCount struct {
@@ -352,6 +362,12 @@ func (c *readPerformanceBenchmarkCounters) snapshot() readPerformanceBenchmarkCo
 	}
 }
 
+func (c *readPerformanceBenchmarkCounters) record(query string, args []any) {
+	if c.capture != nil {
+		c.capture.add(query, args)
+	}
+}
+
 type readPerformanceBenchmarkConnPool struct {
 	gorm.ConnPool
 	counters *readPerformanceBenchmarkCounters
@@ -363,16 +379,19 @@ func (pool *readPerformanceBenchmarkConnPool) PrepareContext(ctx context.Context
 
 func (pool *readPerformanceBenchmarkConnPool) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	pool.counters.statements.Add(1)
+	pool.counters.record(query, args)
 	return pool.ConnPool.ExecContext(ctx, query, args...)
 }
 
 func (pool *readPerformanceBenchmarkConnPool) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
 	pool.counters.statements.Add(1)
+	pool.counters.record(query, args)
 	return pool.ConnPool.QueryContext(ctx, query, args...)
 }
 
 func (pool *readPerformanceBenchmarkConnPool) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
 	pool.counters.statements.Add(1)
+	pool.counters.record(query, args)
 	return pool.ConnPool.QueryRowContext(ctx, query, args...)
 }
 
@@ -402,16 +421,19 @@ type readPerformanceBenchmarkTx struct {
 
 func (tx *readPerformanceBenchmarkTx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	tx.counters.statements.Add(1)
+	tx.counters.record(query, args)
 	return tx.ConnPool.ExecContext(ctx, query, args...)
 }
 
 func (tx *readPerformanceBenchmarkTx) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
 	tx.counters.statements.Add(1)
+	tx.counters.record(query, args)
 	return tx.ConnPool.QueryContext(ctx, query, args...)
 }
 
 func (tx *readPerformanceBenchmarkTx) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
 	tx.counters.statements.Add(1)
+	tx.counters.record(query, args)
 	return tx.ConnPool.QueryRowContext(ctx, query, args...)
 }
 
