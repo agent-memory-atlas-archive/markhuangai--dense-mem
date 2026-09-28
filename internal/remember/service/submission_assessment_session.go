@@ -126,8 +126,11 @@ func (s *assessmentEngine) assessRememberSessionWithValidator(
 	if refresh == nil {
 		return assessor.SemanticAssessmentResponse{}, nil, request, errors.New("synchronous assessment refresh is required")
 	}
+	s.completedInputTokens, s.completedOutputTokens = 0, 0
 	session, turn, err := s.provider.Assess(ctx, request)
 	if err != nil {
+		s.completedInputTokens += max(0, turn.InputTokens)
+		s.completedOutputTokens += max(0, turn.OutputTokens)
 		return assessor.SemanticAssessmentResponse{}, session, request, err
 	}
 	response, finalRequest, err := s.completeRememberSessionTurnsWithValidator(ctx, session, turn, request, refresh, turnOffset, validate)
@@ -163,6 +166,19 @@ func (s *assessmentEngine) completeRememberSessionTurnsWithValidator(
 		validationAttempts++
 		totalTurns := turnOffset + validationAttempts
 		response := turn.Response
+		inputTokens := turn.InputTokens
+		if inputTokens <= 0 {
+			inputTokens = response.InputTokens
+		}
+		if inputTokens <= 0 {
+			inputTokens = request.InputTokens
+		}
+		outputTokens := turn.OutputTokens
+		if outputTokens <= 0 {
+			outputTokens = response.OutputTokens
+		}
+		s.completedInputTokens += inputTokens
+		s.completedOutputTokens += outputTokens
 		validationErrors := append([]assessor.SemanticValidationError(nil), turn.ValidationErrors...)
 		if len(validationErrors) == 0 {
 			response, validationErrors = assessor.PrepareSemanticAssessmentResponse(request, response, s.limits)
@@ -214,6 +230,8 @@ func (s *assessmentEngine) completeRememberSessionTurnsWithValidator(
 			Request: nextRequest, ValidationErrors: validationErrors,
 		})
 		if err != nil {
+			s.completedInputTokens += max(0, turn.InputTokens)
+			s.completedOutputTokens += max(0, turn.OutputTokens)
 			return assessor.SemanticAssessmentResponse{}, request, &submissionAssessmentConsumedTurnsError{cause: wrapSubmissionAssessmentValidationHistory(err, validationHistory), providerTurns: totalTurns}
 		}
 		request = nextRequest
