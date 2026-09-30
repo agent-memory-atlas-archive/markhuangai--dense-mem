@@ -19,10 +19,10 @@ let rpcID = 0;
 const maxPollingAttempts = 60;
 const ownerProfileID = await apiCredentialOwnerID();
 const adverseTeam = await createAdverseEvidenceTeam();
-const seeded = seedSchedulerInputs(ownerProfileID);
+const seeded = await seedSchedulerInputs(ownerProfileID);
 installEvidenceDiagnosticDelay(teamID);
-const evidenceSeeded = seedEvidenceDiscoveryInputs(ownerProfileID);
-seedEvidenceDiscoveryInputs(
+const evidenceSeeded = await seedEvidenceDiscoveryInputs(ownerProfileID);
+await seedEvidenceDiscoveryInputs(
   adverseTeam.ownerProfileID,
   adverseTeam.teamID,
   `Adverse evidence [fixture-fault:unavailable] for ${adverseTeam.teamID}.`,
@@ -430,7 +430,7 @@ async function apiCredentialOwnerID() {
   return credentialID;
 }
 
-function seedSchedulerInputs(ownerProfileID) {
+async function seedSchedulerInputs(ownerProfileID) {
   const subjectID = randomUUID();
   const middleID = randomUUID();
   const objectID = randomUUID();
@@ -447,6 +447,12 @@ function seedSchedulerInputs(ownerProfileID) {
   const secondSupportID = randomUUID();
   const firstQuote = "Dense-Mem uses the Runtime service to process memory requests.";
   const secondQuote = "The Runtime service uses PostgreSQL to store durable memory records.";
+  const firstHash = sha256Hash(firstQuote);
+  const secondHash = sha256Hash(secondQuote);
+  const searchDocuments = await evidenceSearchDocumentsSQL(teamID, ownerProfileID, [
+    { id: firstFragmentID, content: firstQuote, hash: firstHash },
+    { id: secondFragmentID, content: secondQuote, hash: secondHash },
+  ]);
   postgresQuery(`
     INSERT INTO team_predicate_definitions (
       team_id, predicate_key, version, aliases, allowed_subject_kinds,
@@ -491,33 +497,13 @@ function seedSchedulerInputs(ownerProfileID) {
       (
         ${sqlLiteral(teamID)}::uuid, ${sqlLiteral(firstFragmentID)}::uuid,
         ${sqlLiteral(ingestID)}::uuid, ${sqlLiteral(ownerProfileID)}::uuid, 0,
-        ${sqlLiteral(firstQuote)}, 'sha256:compose-e2e-first', 'manual', 'primary', 'compose-e2e-first'
+        ${sqlLiteral(firstQuote)}, ${sqlLiteral(firstHash)}, 'manual', 'primary', 'compose-e2e-first'
       ),
       (
         ${sqlLiteral(teamID)}::uuid, ${sqlLiteral(secondFragmentID)}::uuid,
         ${sqlLiteral(ingestID)}::uuid, ${sqlLiteral(ownerProfileID)}::uuid, 1,
-        ${sqlLiteral(secondQuote)}, 'sha256:compose-e2e-second', 'manual', 'primary', 'compose-e2e-second'
+        ${sqlLiteral(secondQuote)}, ${sqlLiteral(secondHash)}, 'manual', 'primary', 'compose-e2e-second'
       );
-
-    INSERT INTO search_documents (
-      team_id, search_document_id, owner_profile_id, source_kind, source_id, source_version,
-      document_version, embedding_contract_id, embedding_dimensions, search_state,
-      document_text, document_hash, projection_format_version, metadata, embedding
-    )
-    SELECT ${sqlLiteral(teamID)}::uuid, ${sqlLiteral(randomUUID())}::uuid, ${sqlLiteral(ownerProfileID)}::uuid,
-           'evidence', ${sqlLiteral(firstFragmentID)}::uuid, 1, 1, contract.embedding_contract_id,
-           contract.dimensions, 'current', ${sqlLiteral(firstQuote)}, 'sha256:compose-e2e-first',
-           2, '{}'::jsonb, ('[1' || repeat(',0', contract.dimensions - 1) || ']')::vector
-    FROM (
-      SELECT embedding_contract.embedding_contract_id, embedding_contract.dimensions
-      FROM search_index_generations AS generation
-      JOIN embedding_contracts AS embedding_contract
-        ON embedding_contract.embedding_contract_id = generation.embedding_contract_id
-       AND embedding_contract.dimensions = generation.embedding_dimensions
-      WHERE generation.activation_state = 'active' AND embedding_contract.lifecycle_state = 'active'
-      ORDER BY embedding_contract.version DESC, generation.generation DESC, generation.created_at DESC
-      LIMIT 1
-    ) AS contract;
 
     INSERT INTO relationship_records (
       team_id, relationship_id, owner_profile_id, semantic_group_key,
@@ -611,7 +597,15 @@ function seedSchedulerInputs(ownerProfileID) {
         ${sqlLiteral(secondRelationshipID)}::uuid, ${sqlLiteral(ownerProfileID)}::uuid,
         ${sqlLiteral(ownerProfileID)}::uuid, 'grant', 'compose e2e support', '{}'::jsonb
       );
+    ${searchDocuments}
   `);
+  const indexed = postgresQuery(`
+    SELECT count(*) FROM search_documents
+    WHERE team_id = ${sqlLiteral(teamID)}::uuid
+      AND source_kind = 'evidence'
+      AND source_id IN (${sqlLiteral(firstFragmentID)}::uuid, ${sqlLiteral(secondFragmentID)}::uuid)
+  `);
+  assertEqual(indexed, "2", "scheduled premise search-document seed");
   return {
     firstRelationshipID,
     secondRelationshipID,
@@ -623,7 +617,7 @@ function seedSchedulerInputs(ownerProfileID) {
   };
 }
 
-function seedEvidenceDiscoveryInputs(ownerProfileID, targetTeamID = teamID, targetContentOverride = "") {
+async function seedEvidenceDiscoveryInputs(ownerProfileID, targetTeamID = teamID, targetContentOverride = "") {
   const targetID = randomUUID();
   const quarantinedID = randomUUID();
   const ingestID = randomUUID();
@@ -634,6 +628,9 @@ function seedEvidenceDiscoveryInputs(ownerProfileID, targetTeamID = teamID, targ
   const quarantinedContent = "This quarantined evidence must never enter evidence discovery.";
   const targetContentHash = sha256Hash(targetContent);
   const quarantinedContentHash = sha256Hash(quarantinedContent);
+  const searchDocuments = await evidenceSearchDocumentsSQL(targetTeamID, ownerProfileID, [
+    { id: targetID, content: targetContent, hash: targetContentHash },
+  ]);
   postgresQuery(`
     INSERT INTO team_predicate_definitions (
       team_id, predicate_key, version, aliases, allowed_subject_kinds,
@@ -678,54 +675,80 @@ function seedEvidenceDiscoveryInputs(ownerProfileID, targetTeamID = teamID, targ
       ${sqlLiteral(targetTeamID)}::uuid, ${sqlLiteral(quarantineID)}::uuid, ${sqlLiteral(quarantinedID)}::uuid,
       ${sqlLiteral(ingestID)}::uuid, ${sqlLiteral(ownerProfileID)}::uuid, 'active', 'hourly adverse evidence fixture'
     );
-    INSERT INTO search_documents (
-      team_id, search_document_id, owner_profile_id, source_kind, source_id, source_version,
-      document_version, embedding_contract_id, embedding_dimensions, search_state,
-      document_text, document_hash, projection_format_version, metadata, embedding
-    )
-    SELECT ${sqlLiteral(targetTeamID)}::uuid, ${sqlLiteral(randomUUID())}::uuid, ${sqlLiteral(ownerProfileID)}::uuid,
-           'evidence', ${sqlLiteral(targetID)}::uuid, 1, 1, contract.embedding_contract_id,
-           contract.dimensions, 'current', ${sqlLiteral(targetContent)}, ${sqlLiteral(targetContentHash)},
-           2, '{}'::jsonb, ('[' || repeat('0,', contract.dimensions - 1) || '0]')::vector
-    FROM (
-      SELECT embedding_contract.embedding_contract_id, embedding_contract.dimensions
-      FROM search_index_generations AS generation
-      JOIN embedding_contracts AS embedding_contract
-        ON embedding_contract.embedding_contract_id = generation.embedding_contract_id
-       AND embedding_contract.dimensions = generation.embedding_dimensions
-      WHERE generation.activation_state = 'active' AND embedding_contract.lifecycle_state = 'active'
-      ORDER BY embedding_contract.version DESC, generation.generation DESC, generation.created_at DESC
-      LIMIT 1
-    ) AS contract;
-    INSERT INTO search_documents (
-      team_id, search_document_id, owner_profile_id, source_kind, source_id, source_version,
-      document_version, embedding_contract_id, embedding_dimensions, search_state,
-      document_text, document_hash, projection_format_version, metadata, embedding
-    )
-    SELECT ${sqlLiteral(targetTeamID)}::uuid, ${sqlLiteral(randomUUID())}::uuid, ${sqlLiteral(ownerProfileID)}::uuid,
-           'evidence', ${sqlLiteral(quarantinedID)}::uuid, 1, 1, contract.embedding_contract_id,
-           contract.dimensions, 'current', ${sqlLiteral(quarantinedContent)}, ${sqlLiteral(quarantinedContentHash)},
-           2, '{}'::jsonb, ('[' || repeat('0,', contract.dimensions - 1) || '0]')::vector
-    FROM (
-      SELECT embedding_contract.embedding_contract_id, embedding_contract.dimensions
-      FROM search_index_generations AS generation
-      JOIN embedding_contracts AS embedding_contract
-        ON embedding_contract.embedding_contract_id = generation.embedding_contract_id
-       AND embedding_contract.dimensions = generation.embedding_dimensions
-      WHERE generation.activation_state = 'active' AND embedding_contract.lifecycle_state = 'active'
-      ORDER BY embedding_contract.version DESC, generation.generation DESC, generation.created_at DESC
-      LIMIT 1
-    ) AS contract;
+    ${searchDocuments}
   `);
   const indexed = postgresQuery(`
     SELECT count(*)
     FROM search_documents
     WHERE team_id = ${sqlLiteral(targetTeamID)}::uuid
       AND source_kind = 'evidence'
-      AND source_id IN (${sqlLiteral(targetID)}::uuid, ${sqlLiteral(quarantinedID)}::uuid)
+      AND source_id = ${sqlLiteral(targetID)}::uuid
   `);
-  assertEqual(indexed, "2", `evidence search-document seed for ${targetTeamID}`);
+  assertEqual(indexed, "1", `evidence search-document seed for ${targetTeamID}`);
+  const quarantinedIndexed = postgresQuery(`
+    SELECT count(*) FROM search_documents
+    WHERE team_id = ${sqlLiteral(targetTeamID)}::uuid
+      AND source_kind = 'evidence'
+      AND source_id = ${sqlLiteral(quarantinedID)}::uuid
+  `);
+  assertEqual(quarantinedIndexed, "0", "quarantined evidence has no search document");
   return { targetID, targetContent };
+}
+
+async function evidenceSearchDocumentsSQL(targetTeamID, ownerProfileID, documents) {
+  const model = requiredEnv("AI_API_EMBEDDING_MODEL");
+  const dimensions = Number(requiredEnv("AI_API_EMBEDDING_DIMENSIONS"));
+  const response = await fetch(`${requiredEnv("AI_API_URL").replace(/\/$/, "")}/embeddings`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${requiredEnv("AI_API_KEY")}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ model, dimensions, input: documents.map((document) => document.content) }),
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!response.ok) throw new Error(`evidence fixture embedding failed with HTTP ${response.status}`);
+  const payload = await response.json();
+  if (!Array.isArray(payload.data) || payload.data.length !== documents.length ||
+      payload.data.some((item) => !item || !Array.isArray(item.embedding) || item.embedding.length !== dimensions ||
+        item.embedding.some((value) => typeof value !== "number" || !Number.isFinite(value)))) {
+    throw new Error("evidence fixture embedding response has invalid vectors");
+  }
+  const vectors = new Array(documents.length);
+  for (const item of payload.data) {
+    if (!Number.isInteger(item.index) || item.index < 0 || item.index >= documents.length ||
+        vectors[item.index] !== undefined) {
+      throw new Error("evidence fixture embedding response has invalid indexes");
+    }
+    vectors[item.index] = item.embedding;
+  }
+  const values = documents.map((document, index) => `(
+    ${sqlLiteral(randomUUID())}::uuid, ${sqlLiteral(document.id)}::uuid,
+    ${sqlLiteral(document.content)}, ${sqlLiteral(document.hash)},
+    ${sqlLiteral(JSON.stringify(vectors[index]))}::vector
+  )`).join(",");
+  return `
+    INSERT INTO search_documents (
+      team_id, search_document_id, owner_profile_id, source_kind, source_id, source_version,
+      document_version, embedding_contract_id, embedding_dimensions, search_state,
+      document_text, document_hash, projection_format_version, metadata, embedding
+    )
+    SELECT ${sqlLiteral(targetTeamID)}::uuid, fixture.search_document_id, ${sqlLiteral(ownerProfileID)}::uuid,
+           'evidence', fixture.source_id, 1, 1, contract.embedding_contract_id,
+           contract.dimensions, 'current', fixture.document_text, fixture.document_hash,
+           1, '{}'::jsonb, fixture.embedding
+    FROM (VALUES ${values}) AS fixture(search_document_id, source_id, document_text, document_hash, embedding)
+    CROSS JOIN (
+      SELECT embedding_contract.embedding_contract_id, embedding_contract.dimensions
+      FROM search_index_generations AS generation
+      JOIN embedding_contracts AS embedding_contract
+        ON embedding_contract.embedding_contract_id = generation.embedding_contract_id
+       AND embedding_contract.dimensions = generation.embedding_dimensions
+      WHERE generation.activation_state = 'active' AND embedding_contract.lifecycle_state = 'active'
+      ORDER BY embedding_contract.version DESC, generation.generation DESC, generation.created_at DESC
+      LIMIT 1
+    ) AS contract;
+  `;
 }
 
 async function createAdverseEvidenceTeam() {
@@ -914,7 +937,7 @@ function postgresQuery(sql) {
     encoding: "utf8",
   });
   if (result.status !== 0) {
-    throw new Error(`postgres query failed (${result.status}): ${result.stderr || result.stdout}`);
+    throw new Error(`postgres query failed (${result.status}): ${result.error?.message || result.stderr || result.stdout || result.signal || "no process output"}`);
   }
   return result.stdout.trim();
 }
