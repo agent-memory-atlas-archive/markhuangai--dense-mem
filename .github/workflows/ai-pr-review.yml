@@ -340,7 +340,7 @@ jobs:
           model: auto
           effort: xhigh
           parallel-count: "6"
-          max-turns: "100"
+          max-turns: "200"
           auto-approve: "false"
           review-prompts: |
             [
