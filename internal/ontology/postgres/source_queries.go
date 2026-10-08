@@ -1,5 +1,63 @@
 package postgres
 
+const maintenanceEntityPageSQL = `SELECT entity_id::text AS id,version FROM entity_records WHERE team_id=?::uuid AND space_id=?::uuid AND space_generation=? AND entity_id>COALESCE(NULLIF(?,'')::uuid,'00000000-0000-0000-0000-000000000000'::uuid) ORDER BY entity_id LIMIT ?`
+
+const maintenanceDefinitionPageSQL = `WITH RECURSIVE input AS (
+ SELECT ?::uuid AS team_id,?::uuid AS shared_space_id,?::bigint AS space_generation,
+ NULLIF(?,'')::uuid AS record_id,?::text AS source_kind,?::text AS source_id,
+ ?::text AS after_kind,?::text AS after_id
+), roots AS (
+ SELECT head.record_id FROM ontology_record_heads AS head JOIN input AS scope
+ USING(team_id,shared_space_id,space_generation) WHERE head.record_id=scope.record_id
+ UNION
+ SELECT dependency.record_id FROM ontology_source_dependencies AS dependency
+ JOIN ontology_record_heads AS head ON head.team_id=dependency.team_id
+ AND head.shared_space_id=dependency.shared_space_id AND head.space_generation=dependency.space_generation
+ AND head.record_id=dependency.record_id AND head.version=dependency.record_version
+ JOIN input AS scope ON scope.team_id=dependency.team_id AND scope.shared_space_id=dependency.shared_space_id
+ AND scope.space_generation=dependency.space_generation
+ WHERE dependency.source_kind=scope.source_kind AND dependency.source_id=scope.source_id AND NOT head.retired
+), affected(record_id) AS (
+ SELECT record_id FROM roots
+ UNION
+ SELECT dependency.record_id FROM ontology_revision_dependencies AS dependency
+ JOIN affected ON affected.record_id=dependency.dependency_id
+ JOIN ontology_record_heads AS head ON head.team_id=dependency.team_id
+ AND head.shared_space_id=dependency.shared_space_id AND head.space_generation=dependency.space_generation
+ AND head.record_id=dependency.record_id AND head.version=dependency.record_version
+ JOIN input AS scope ON scope.team_id=dependency.team_id AND scope.shared_space_id=dependency.shared_space_id
+ AND scope.space_generation=dependency.space_generation
+), words AS (
+ SELECT head.names || tsvector_to_array(to_tsvector('simple',array_to_string(head.names,' ') || ' ' ||
+ COALESCE(revision.body->'definition'->>'description',''))) AS terms
+ FROM ontology_record_heads AS head JOIN ontology_record_revisions AS revision
+ USING(team_id,shared_space_id,space_generation,record_id,version)
+ JOIN input AS scope USING(team_id,shared_space_id,space_generation)
+ WHERE head.record_id=scope.record_id AND head.kind IN ('entity_class','predicate_concept','topic')
+), keys AS (
+ SELECT dependency.source_kind,dependency.source_id FROM affected
+ JOIN ontology_source_dependencies AS dependency ON dependency.record_id=affected.record_id
+ JOIN input AS scope USING(team_id,shared_space_id,space_generation)
+ UNION
+ SELECT source.source_kind,source.source_id FROM affected
+ JOIN ontology_assessments AS assessment ON assessment.body->'dependencies' @>
+ jsonb_build_array(jsonb_build_object('id',affected.record_id::text))
+ JOIN input AS scope ON scope.team_id=assessment.team_id AND scope.shared_space_id=assessment.shared_space_id
+ AND scope.space_generation=assessment.space_generation
+ JOIN ontology_maintenance_sources AS source ON source.team_id=assessment.team_id
+ AND source.shared_space_id=assessment.shared_space_id AND source.space_generation=assessment.space_generation
+ AND source.assessment_id=assessment.assessment_id
+ UNION
+ SELECT source.source_kind,source.source_id FROM ontology_maintenance_sources AS source
+ JOIN input AS scope USING(team_id,shared_space_id,space_generation)
+ JOIN words ON source.vocabulary_words && words.terms
+)
+SELECT source.source_kind,source.source_id,source.source_version FROM keys
+JOIN ontology_maintenance_sources AS source USING(source_kind,source_id)
+JOIN input AS scope USING(team_id,shared_space_id,space_generation)
+WHERE source.eligible AND (source.source_kind,source.source_id)>(scope.after_kind,scope.after_id)
+ORDER BY source.source_kind,source.source_id LIMIT ?`
+
 const entitySourceSQL = `
 WITH candidate AS (
     SELECT * FROM entity_records
@@ -112,3 +170,10 @@ SELECT version,''::text,''::text,
           'object_kinds',allowed_object_kinds::text,'kind',relationship_kind,
           'cardinality',current_cardinality,'lifecycle',lifecycle_state,'metadata',metadata::text),
        ''::text FROM candidate`
+
+const eligiblePredicateSelect = `SELECT DISTINCT ON (definition.predicate_key) definition.predicate_key AS id,definition.version
+ FROM team_predicate_definitions AS definition JOIN relationship_records AS candidate
+ ON candidate.team_id=definition.team_id AND candidate.predicate_key=definition.predicate_key AND candidate.predicate_version=definition.version
+ WHERE candidate.team_id=?::uuid AND candidate.space_id=?::uuid AND candidate.space_generation=?
+ AND candidate.status='active' AND candidate.support_count>0 AND candidate.identity_alias_of_relationship_id IS NULL
+ AND definition.lifecycle_state='active' AND EXISTS (` + eligibleSupportsSQL + `)`
