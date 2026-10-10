@@ -247,6 +247,101 @@ func TestOntologyFingerprintsAreStableAndSelective(t *testing.T) {
 	require.Equal(t, retired, again)
 }
 
+func TestOntologyBatchFingerprintsPreserveVersionsAndFreshness(t *testing.T) {
+	first := policySnapshot("predicate", PredicateSource, "version one")
+	first.ID = "uses"
+	second := first
+	second.Version++
+	second.State = map[string]string{"contract": "version two"}
+	available := map[SourceHandle]SourceSnapshot{first.SourceHandle: first, second.SourceHandle: second}
+	records := []Record{topicRecord("one"), topicRecord("two")}
+	for i, snapshot := range []SourceSnapshot{first, second} {
+		records[i].Sources = []SourceDependency{sourceDependency(t, snapshot)}
+		fingerprint, err := RecordFingerprint(records[i], map[string]SourceSnapshot{SourceKey(snapshot.SourceHandle): snapshot}, nil)
+		require.NoError(t, err)
+		records[i].Fingerprint = fingerprint
+	}
+	catalog := map[string]Record{records[0].ID: records[0], records[1].ID: records[1]}
+	batch := NewRecordFingerprints(available, catalog)
+	for range 2 {
+		for _, record := range records {
+			require.NoError(t, batch.CheckSourceDependencies(record))
+			fingerprint, err := batch.Fingerprint(record)
+			require.NoError(t, err)
+			require.Equal(t, record.Fingerprint, fingerprint)
+		}
+	}
+	child := topicRecord("child")
+	child.Definition.ParentID = records[0].ID
+	require.NoError(t, batch.CheckDependencies([]Record{child}))
+	require.NoError(t, batch.CheckDependencies([]Record{child}))
+	edited := records[0]
+	definition := *edited.Definition
+	definition.Description = "Changed root with the same ID and version"
+	edited.Definition = &definition
+	fingerprint, err := batch.Fingerprint(edited)
+	require.NoError(t, err)
+	require.NotEqual(t, records[0].Fingerprint, fingerprint)
+	changed := first
+	changed.State = map[string]string{"contract": "changed version one"}
+	available = map[SourceHandle]SourceSnapshot{first.SourceHandle: changed, second.SourceHandle: second}
+	fresh := NewRecordFingerprints(available, catalog)
+	require.ErrorIs(t, fresh.CheckSourceDependencies(records[0]), ErrSourceStale)
+	require.NoError(t, fresh.CheckSourceDependencies(records[1]))
+	require.ErrorIs(t, fresh.CheckDependencies([]Record{child}), ErrSourceStale)
+	fingerprint, err = fresh.Fingerprint(records[0])
+	require.NoError(t, err)
+	require.NotEqual(t, records[0].Fingerprint, fingerprint)
+	fingerprint, err = fresh.Fingerprint(records[1])
+	require.NoError(t, err)
+	require.Equal(t, records[1].Fingerprint, fingerprint)
+	for name, snapshot := range map[string]SourceSnapshot{
+		"ineligible":    {SourceHandle: first.SourceHandle, Eligible: false},
+		"wrong version": second,
+		"missing":       {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			batch := NewRecordFingerprints(map[SourceHandle]SourceSnapshot{first.SourceHandle: snapshot}, catalog)
+			require.ErrorIs(t, batch.CheckSourceDependencies(records[0]), ErrSourceStale)
+			_, err := batch.Fingerprint(records[0])
+			require.ErrorIs(t, err, ErrSourceStale)
+			require.ErrorIs(t, batch.CheckDependencies([]Record{child}), ErrSourceStale)
+		})
+	}
+}
+
+func TestOntologyPublicationEnforcesAggregateBounds(t *testing.T) {
+	input := publicationFor(topicRecord("escaped"))
+	input.Changes[0].Record.Definition.Description = strings.Repeat("\x01", MaxPublicationBytes)
+	require.ErrorIs(t, ValidatePublication(input), ErrInvalid)
+	input = Publication{OperationKey: "bounded", Reason: "aggregate dependencies"}
+	for i := 0; i < 5; i++ {
+		record := topicRecord(uuid.NewString())
+		for j := 0; j < MaxMembers; j++ {
+			record.Dependencies = append(record.Dependencies, RevisionRef{ID: uuid.NewString(), Version: 1})
+		}
+		input.Changes = append(input.Changes, Change{Record: record})
+	}
+	require.ErrorIs(t, ValidatePublication(input), ErrInvalid)
+}
+
+func TestOntologySeedingPreservesExistingKinds(t *testing.T) {
+	predicate := policySnapshot("predicate", PredicateSource, "")
+	predicate.ID = "uses"
+	first, err := SeedRecords(predicate.TeamID, []SourceSnapshot{predicate})
+	require.NoError(t, err)
+	require.Len(t, first, 9)
+	second, err := SeedRecords(predicate.TeamID, []SourceSnapshot{predicate})
+	require.NoError(t, err)
+	require.Equal(t, first, second)
+	for _, record := range first {
+		require.NoError(t, ValidateRecord(record))
+	}
+	predicate.Eligible = false
+	_, err = SeedRecords(predicate.TeamID, []SourceSnapshot{predicate})
+	require.ErrorIs(t, err, ErrSourceStale)
+}
+
 func TestOntologyOverrideApplicabilityFollowsActionAndRecordKind(t *testing.T) {
 	first, second := policySnapshot("a", EvidenceSource, "same"), policySnapshot("b", EvidenceSource, "same")
 	topic := topicRecord("topic")
@@ -291,36 +386,4 @@ func TestOntologyMixedSeparationOverrideMatchesEveryMemberKind(t *testing.T) {
 			require.Empty(t, ApplicableOverrides(assignment, catalog))
 		})
 	}
-}
-
-func TestOntologyPublicationEnforcesAggregateBounds(t *testing.T) {
-	input := publicationFor(topicRecord("escaped"))
-	input.Changes[0].Record.Definition.Description = strings.Repeat("\x01", MaxPublicationBytes)
-	require.ErrorIs(t, ValidatePublication(input), ErrInvalid)
-	input = Publication{OperationKey: "bounded", Reason: "aggregate dependencies"}
-	for i := 0; i < 5; i++ {
-		record := topicRecord(uuid.NewString())
-		for j := 0; j < MaxMembers; j++ {
-			record.Dependencies = append(record.Dependencies, RevisionRef{ID: uuid.NewString(), Version: 1})
-		}
-		input.Changes = append(input.Changes, Change{Record: record})
-	}
-	require.ErrorIs(t, ValidatePublication(input), ErrInvalid)
-}
-
-func TestOntologySeedingPreservesExistingKinds(t *testing.T) {
-	predicate := policySnapshot("predicate", PredicateSource, "")
-	predicate.ID = "uses"
-	first, err := SeedRecords(predicate.TeamID, []SourceSnapshot{predicate})
-	require.NoError(t, err)
-	require.Len(t, first, 9)
-	second, err := SeedRecords(predicate.TeamID, []SourceSnapshot{predicate})
-	require.NoError(t, err)
-	require.Equal(t, first, second)
-	for _, record := range first {
-		require.NoError(t, ValidateRecord(record))
-	}
-	predicate.Eligible = false
-	_, err = SeedRecords(predicate.TeamID, []SourceSnapshot{predicate})
-	require.ErrorIs(t, err, ErrSourceStale)
 }

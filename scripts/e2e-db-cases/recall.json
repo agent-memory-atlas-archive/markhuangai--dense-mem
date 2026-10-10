@@ -281,6 +281,126 @@
       "run": "^TestSearchReadinessRejectsStaleRelationshipProjectionGeneration$",
       "phase": "precheck",
       "source": "internal/recall/postgres/recall_relationship_generation_integration_test.go"
+    },
+    {
+      "id": "repository/TestRecallOntologyGroupingKnownIDsAndStaleSources",
+      "package": "./internal/recall/postgres",
+      "run": "^TestRecallOntologyGroupingKnownIDsAndStaleSources$",
+      "phase": "scenario",
+      "source": "internal/recall/postgres/recall_ontology_integration_test.go",
+      "scenario": "ontology_organization"
+    },
+    {
+      "id": "repository/TestRecallOntologyDiscoveryAliasesAndTemporalFallback",
+      "package": "./internal/recall/postgres",
+      "run": "^TestRecallOntologyDiscoveryAliasesAndTemporalFallback$",
+      "phase": "scenario",
+      "source": "internal/recall/postgres/recall_ontology_integration_test.go",
+      "scenario": "ontology_organization"
+    },
+    {
+      "id": "repository/TestRecallOntologyOptionalFailureAndRequiredFailureRemainDistinct",
+      "package": "./internal/recall/postgres",
+      "run": "^TestRecallOntologyOptionalFailureAndRequiredFailureRemainDistinct$",
+      "phase": "scenario",
+      "source": "internal/recall/postgres/recall_ontology_integration_test.go",
+      "scenario": "ontology_organization"
+    },
+    {
+      "id": "repository/TestRecallOntologyPrivateForeignAndOldGenerationSources",
+      "package": "./internal/recall/postgres",
+      "run": "^TestRecallOntologyPrivateForeignAndOldGenerationSources$",
+      "phase": "scenario",
+      "source": "internal/recall/postgres/recall_ontology_scope_integration_test.go",
+      "scenario": "ontology_organization"
+    },
+    {
+      "id": "repository/TestRecallOntologyHydrationUsesOneSnapshotAcrossRetraction",
+      "package": "./internal/recall/postgres",
+      "run": "^TestRecallOntologyHydrationUsesOneSnapshotAcrossRetraction$",
+      "phase": "scenario",
+      "source": "internal/recall/postgres/recall_ontology_scope_integration_test.go",
+      "scenario": "ontology_organization"
+    },
+    {
+      "id": "repository/TestRecallOntologySourceRevisionCorrectionAndDefinitionStaleness",
+      "package": "./internal/recall/postgres",
+      "run": "^TestRecallOntologySourceRevisionCorrectionAndDefinitionStaleness$",
+      "phase": "scenario",
+      "source": "internal/recall/postgres/recall_ontology_scope_integration_test.go",
+      "scenario": "ontology_organization"
+    },
+    {
+      "id": "repository/TestRecallOntologyFrozenCohort",
+      "package": "./internal/recall/postgres",
+      "run": "^TestRecallOntologyFrozenCohort$",
+      "phase": "scenario",
+      "source": "internal/recall/postgres/recall_ontology_cohort_integration_test.go",
+      "scenario": "ontology_organization"
+    },
+    {
+      "id": "repository/TestRecallOntologyPunctuatedKeysAndAliases",
+      "package": "./internal/recall/postgres",
+      "run": "^TestRecallOntologyPunctuatedKeysAndAliases$",
+      "phase": "scenario",
+      "source": "internal/recall/postgres/recall_ontology_integration_test.go",
+      "scenario": "ontology_organization"
+    },
+    {
+      "id": "repository/TestRecallOntologyFeedbackAlternatesDoNotInflateResults",
+      "package": "./internal/recall/postgres",
+      "run": "^TestRecallOntologyFeedbackAlternatesDoNotInflateResults$",
+      "phase": "scenario",
+      "source": "internal/recall/postgres/recall_ontology_integration_test.go",
+      "scenario": "ontology_organization"
+    },
+    {
+      "id": "repository/TestRecallOntologyRelationshipDiscoveryPreservesSemanticGroups",
+      "package": "./internal/recall/postgres",
+      "run": "^TestRecallOntologyRelationshipDiscoveryPreservesSemanticGroups$",
+      "phase": "scenario",
+      "source": "internal/recall/postgres/recall_ontology_integration_test.go",
+      "scenario": "ontology_organization"
+    },
+    {
+      "id": "repository/TestRecallOntologyBatchKeepsActivePredicateVersions",
+      "package": "./internal/recall/postgres",
+      "run": "^TestRecallOntologyBatchKeepsActivePredicateVersions$",
+      "phase": "scenario",
+      "source": "internal/recall/postgres/recall_ontology_integration_test.go",
+      "scenario": "ontology_organization"
+    },
+    {
+      "id": "repository/TestRecallOntologyReaderResetsBetweenTransactions",
+      "package": "./internal/recall/postgres",
+      "run": "^TestRecallOntologyReaderResetsBetweenTransactions$",
+      "phase": "scenario",
+      "source": "internal/recall/postgres/recall_ontology_scope_integration_test.go",
+      "scenario": "ontology_organization"
+    },
+    {
+      "id": "repository/TestRecallOntologyDiscoveryHydrationEnforcesEligibilityAndState",
+      "package": "./internal/recall/postgres",
+      "run": "^TestRecallOntologyDiscoveryHydrationEnforcesEligibilityAndState$",
+      "phase": "scenario",
+      "source": "internal/recall/postgres/recall_ontology_scope_integration_test.go",
+      "scenario": "ontology_organization"
+    },
+    {
+      "id": "repository/TestRecallOntologyMigratedAliasRemainsIneligibleWithCurrentProjection",
+      "package": "./internal/recall/postgres",
+      "run": "^TestRecallOntologyMigratedAliasRemainsIneligibleWithCurrentProjection$",
+      "phase": "scenario",
+      "source": "internal/recall/postgres/recall_ontology_scope_integration_test.go",
+      "scenario": "ontology_organization"
+    },
+    {
+      "id": "repository/TestRecallOntologyPrefetchedGroupsReadNewEvidenceAndReauthorize",
+      "package": "./internal/recall/postgres",
+      "run": "^TestRecallOntologyPrefetchedGroupsReadNewEvidenceAndReauthorize$",
+      "phase": "scenario",
+      "source": "internal/recall/postgres/recall_ontology_scope_integration_test.go",
+      "scenario": "ontology_organization"
     }
   ]
 }

@@ -346,6 +346,30 @@
       "source": "internal/ontology/postgres/maintenance_service_integration_test.go"
     },
     {
+      "id": "repository/TestOntologyUnavailableSnapshotRetainsScopedHandleForMaintenance",
+      "package": "./internal/ontology/postgres",
+      "run": "^TestOntologyUnavailableSnapshotRetainsScopedHandleForMaintenance$",
+      "phase": "scenario",
+      "source": "internal/ontology/postgres/sources_integration_test.go",
+      "scenario": "ontology_organization"
+    },
+    {
+      "id": "repository/TestOntologyOrganizationPreservesValidLargeSourceContext",
+      "package": "./internal/ontology/postgres",
+      "run": "^TestOntologyOrganizationPreservesValidLargeSourceContext$",
+      "phase": "scenario",
+      "source": "internal/ontology/postgres/sources_integration_test.go",
+      "scenario": "ontology_organization"
+    },
+    {
+      "id": "repository/TestOntologyOrganizationPreservesPerRecordDependencyBounds",
+      "package": "./internal/ontology/postgres",
+      "run": "^TestOntologyOrganizationPreservesPerRecordDependencyBounds$",
+      "phase": "scenario",
+      "source": "internal/ontology/postgres/sources_integration_test.go",
+      "scenario": "ontology_organization"
+    },
+    {
       "id": "repository/TestOntologyAutomaticRetirementPreservesGroupingOverrides",
       "package": "./internal/ontology/postgres",
       "run": "^TestOntologyAutomaticRetirementPreservesGroupingOverrides$",

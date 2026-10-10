@@ -864,12 +864,14 @@ test("Grafana range panels use a scrape-safe lookback", async () => {
   }
 });
 
-test("community and conflict fixtures forward healthy embeddings upstream", () => {
+test("community, ontology, and conflict fixtures forward healthy embeddings upstream", () => {
   const communityStart = stack.indexOf('if (scenario === "community")');
   const communityEnd = stack.indexOf('if (has("conflict_provider"))', communityStart);
   const communityBlock = stack.slice(communityStart, communityEnd);
   assert.ok(communityStart >= 0 && communityEnd > communityStart);
   assert.match(communityBlock, /AI_API_URL: "http:\/\/synchronous-write-provider:8787\/v1"/);
+  assert.match(stack, /const fixtureEmbeddingProvider = [^;]*scenario === "ontology_organization"/);
+  assert.match(stack, /if \(scenario === "ontology_organization"\) \{[\s\S]*?AI_API_URL: "http:\/\/synchronous-write-provider:8787\/v1"/);
   assert.match(stack, /DENSE_MEM_E2E_EMBEDDING_BASE_URL/);
   assert.match(stack, /DENSE_MEM_E2E_EMBEDDING_API_KEY/);
   assert.match(stack, /embedding_upstream\.mjs/);
