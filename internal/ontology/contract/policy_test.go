@@ -247,6 +247,52 @@ func TestOntologyFingerprintsAreStableAndSelective(t *testing.T) {
 	require.Equal(t, retired, again)
 }
 
+func TestOntologyOverrideApplicabilityFollowsActionAndRecordKind(t *testing.T) {
+	first, second := policySnapshot("a", EvidenceSource, "same"), policySnapshot("b", EvidenceSource, "same")
+	topic := topicRecord("topic")
+	assignment := Record{ID: policyID("assignment"), Kind: AssignmentKind, Assignment: &Assignment{Source: first.SourceHandle, DefinitionID: topic.ID}, Sources: []SourceDependency{sourceDependency(t, first)}}
+	group := Record{ID: policyID("group"), Kind: EvidenceGroup, Group: &Group{Members: []SourceHandle{first.SourceHandle, second.SourceHandle}}}
+	separation := Record{ID: policyID("separation"), Kind: OverrideKind, Override: &Override{Action: KeepSeparate, Members: group.Group.Members}}
+	classification := Record{ID: policyID("classification"), Kind: OverrideKind, Override: &Override{Action: SetClassification, Members: []SourceHandle{first.SourceHandle}, DefinitionID: topic.ID}}
+	pin := Record{ID: policyID("pin"), Kind: OverrideKind, Override: &Override{Action: PinDefinition, TargetID: topic.ID}}
+	catalog := map[string]Record{separation.ID: separation, classification.ID: classification, pin.ID: pin}
+	require.Equal(t, []Record{classification}, ApplicableOverrides(assignment, catalog))
+	require.Equal(t, []Record{separation}, ApplicableOverrides(group, catalog))
+	require.Equal(t, []Record{pin}, ApplicableOverrides(topic, catalog))
+	snapshots := map[string]SourceSnapshot{SourceKey(first.SourceHandle): first}
+	one, err := RecordFingerprint(assignment, snapshots, map[string]Record{topic.ID: topic})
+	require.NoError(t, err)
+	two, err := RecordFingerprint(assignment, snapshots, map[string]Record{topic.ID: topic, separation.ID: separation})
+	require.NoError(t, err)
+	require.Equal(t, one, two)
+}
+
+func TestOntologyMixedSeparationOverrideMatchesEveryMemberKind(t *testing.T) {
+	evidenceA, evidenceB := policySnapshot("evidence-a", EvidenceSource, "same"), policySnapshot("evidence-b", EvidenceSource, "same")
+	relationshipA, relationshipB := policySnapshot("relationship-a", RelationshipSource, "same"), policySnapshot("relationship-b", RelationshipSource, "same")
+	for _, testCase := range []struct {
+		kind    Kind
+		members []SourceHandle
+		group   []SourceHandle
+	}{
+		{EvidenceGroup, []SourceHandle{relationshipA.SourceHandle, evidenceA.SourceHandle, evidenceB.SourceHandle}, []SourceHandle{evidenceA.SourceHandle, evidenceB.SourceHandle}},
+		{RelationshipGroup, []SourceHandle{evidenceA.SourceHandle, relationshipA.SourceHandle, relationshipB.SourceHandle}, []SourceHandle{relationshipA.SourceHandle, relationshipB.SourceHandle}},
+	} {
+		t.Run(string(testCase.kind), func(t *testing.T) {
+			override := Record{ID: policyID("mixed-separation"), Kind: OverrideKind, Override: &Override{Action: KeepSeparate, Members: testCase.members}}
+			require.NoError(t, ValidatePublication(publicationFor(override)))
+			catalog := map[string]Record{override.ID: override}
+			group := Record{ID: policyID("mixed-group"), Kind: testCase.kind, Group: &Group{Members: testCase.group}}
+			require.Equal(t, []Record{override}, ApplicableOverrides(group, catalog))
+			require.ErrorIs(t, CheckOverrides(group, catalog), ErrOverride)
+			group.Retired = true
+			require.NoError(t, CheckOverrides(group, catalog))
+			assignment := Record{ID: policyID("mixed-assignment"), Kind: AssignmentKind, Assignment: &Assignment{Source: testCase.group[0], DefinitionID: policyID("topic")}}
+			require.Empty(t, ApplicableOverrides(assignment, catalog))
+		})
+	}
+}
+
 func TestOntologyPublicationEnforcesAggregateBounds(t *testing.T) {
 	input := publicationFor(topicRecord("escaped"))
 	input.Changes[0].Record.Definition.Description = strings.Repeat("\x01", MaxPublicationBytes)
