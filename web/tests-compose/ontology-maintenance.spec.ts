@@ -49,8 +49,10 @@ test("loaded older retry actions follow successful work and server eligibility",
     });
     expect(submitted.status()).toBe(200);
     const rpc = await submitted.json();
-    expect(rpc.result?.isError).not.toBe(true);
-    expect(JSON.parse(rpc.result.content[0].text).processing_state).toBe("completed");
+    const remembered = JSON.parse(rpc.result.content[0].text);
+    expect(rpc.result?.isError, JSON.stringify({ processing_state: remembered.processing_state,
+      errors: (remembered.errors || []).map(({ code, reason_code, retryable, next_action }: { code: string; reason_code?: string; retryable: boolean; next_action: string }) => ({ code, reason_code, retryable, next_action })) })).not.toBe(true);
+    expect(remembered.processing_state).toBe("completed");
     await control("/ontology/resume", { operation_key: randomUUID() });
     const failedCommand = await control("/ontology/runs", { operation_key: randomUUID(), max_batches: 1 });
     await expect.poll(async () => {
@@ -59,7 +61,7 @@ test("loaded older retry actions follow successful work and server eligibility",
     }, { timeout: 120000 }).toBe("incomplete");
     const history = await control("/ontology/runs?limit=200");
     const failed = history.runs.find((run: { id: string }) => run.id === failedCommand.id);
-    expect(failed.retryable).toBe(true);
+    expect(failed.retryable, JSON.stringify({ status: failed.status, failure_code: failed.failure_code, completed_batches: failed.completed_batches })).toBe(true);
     expect(failed.failure_code).toBeTruthy();
     await fixtureMode("normal");
     await control("/ontology/pause", { operation_key: randomUUID() });

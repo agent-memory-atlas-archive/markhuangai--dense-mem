@@ -35,7 +35,7 @@ type CommunityRepository interface {
 	LatestCommunityRun(ctx context.Context, teamID string) (*CommunityRun, error)
 	ListCurrentCommunityLineage(ctx context.Context, teamID string) ([]CommunityLineageRecord, error)
 	ListCommunitySemanticGroups(ctx context.Context, input CommunityCoverageInput) ([]string, error)
-	RecallCommunities(ctx context.Context, input CommunityRecallInput) ([]CommunityRecallRecord, error)
+	RecallCommunities(ctx context.Context, input CommunityRecallInput) ([]CommunityRecallRecord, *TopicProjectionCoverage, error)
 	RecordCommunitySummaryAttempt(ctx context.Context, input CommunitySummaryAttemptInput) error
 }
 
@@ -90,8 +90,9 @@ type CommunityRun struct {
 }
 
 type CommunityInputListInput struct {
-	TeamID string
-	Limit  int
+	TeamID          string
+	Limit           int
+	RelationshipIDs []string
 }
 
 type CommunityInput struct {
@@ -174,19 +175,20 @@ type CommunityLineageRecord struct {
 }
 
 type CommunityRecallInput struct {
-	TeamID               string
-	Query                string
-	ValidAt              *time.Time
-	KnownAt              *time.Time
-	ReturnedEvidenceIDs  []string
-	KnownEvidenceIDs     []string
-	KnownRelationshipIDs []string
-	SeedRelationshipIDs  []string
-	ExpandFromEntityIDs  []string
-	ExcludedGroupKeys    []string
-	CoveredGroupKeys     []string
-	Limit                int
-	RelationshipLimit    int
+	TeamID                  string
+	ExpectedOntologyEnabled *bool
+	Query                   string
+	ValidAt                 *time.Time
+	KnownAt                 *time.Time
+	ReturnedEvidenceIDs     []string
+	KnownEvidenceIDs        []string
+	KnownRelationshipIDs    []string
+	SeedRelationshipIDs     []string
+	ExpandFromEntityIDs     []string
+	ExcludedGroupKeys       []string
+	CoveredGroupKeys        []string
+	Limit                   int
+	RelationshipLimit       int
 }
 
 type CommunityCoverageInput struct {
