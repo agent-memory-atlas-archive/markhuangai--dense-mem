@@ -1,3 +1,4 @@
+import { navigate, openNavigation, confirmAction, expectPageContained, expectCompactNumberField } from "../tests-support/portal";
 import { randomUUID } from "node:crypto";
 import { expect, test } from "@playwright/test";
 
@@ -8,11 +9,16 @@ test("operators inspect ontology coverage and pause or resume durable admission"
   await page.goto(controlURL);
   await page.getByLabel("Control token").fill(token);
   await page.getByRole("button", { name: "Unlock" }).click();
-  await page.getByRole("button", { name: "Config", exact: true }).click();
-  await page.getByRole("tab", { name: "Ontology", exact: true }).click();
+  await navigate(page, "Ontology maintenance");
   await expect(page.getByRole("heading", { name: "Ontology coverage" })).toBeVisible();
   await expect(page.getByLabel("Enable ontology maintenance")).toBeVisible();
-  await expect(page.getByText(/Pending policy:/)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Pending policy", exact: true })).toBeVisible();
+  await expect(page.getByRole("group", { name: "Schedule", exact: true })).toBeVisible();
+  await expect(page.getByRole("group", { name: "Processing", exact: true })).toBeVisible();
+  await expect(page.getByRole("group", { name: "Allowance per window", exact: true })).toBeVisible();
+  await expectCompactNumberField(page, "Cadence (hours)");
+  await expectCompactNumberField(page, "Concurrent assessments");
+  await expectPageContained(page);
   await page.getByRole("button", { name: "Pause maintenance", exact: true }).click();
   await expect(page.getByRole("status")).toContainText("Maintenance paused");
   await page.getByRole("button", { name: "Resume maintenance", exact: true }).click();
@@ -51,8 +57,7 @@ test("operators add allowance to the active window without resetting its policy"
     await page.goto(controlURL);
     await page.getByLabel("Control token").fill(token);
     await page.getByRole("button", { name: "Unlock" }).click();
-    await page.getByRole("button", { name: "Config", exact: true }).click();
-    await page.getByRole("tab", { name: "Ontology", exact: true }).click();
+    await navigate(page, "Ontology maintenance");
     await page.getByLabel("Additional input tokens").fill("1234");
     await page.getByLabel("Additional output tokens").fill("5678");
     await page.getByRole("button", { name: "Add allowance now", exact: true }).click();
@@ -64,6 +69,9 @@ test("operators add allowance to the active window without resetting its policy"
     expect(after.additional_input_tokens).toBe(before.additional_input_tokens + 1234);
     expect(after.additional_output_tokens).toBe(before.additional_output_tokens + 5678);
     expect(after.charged_input_tokens).toBeGreaterThanOrEqual(before.charged_input_tokens);
+    await expect(page.getByRole("progressbar", { name: "Input tokens", exact: true })).toHaveAttribute("aria-valuetext", new RegExp(` of ${(after.policy.input_tokens + after.additional_input_tokens).toLocaleString()}$`));
+    await expect(page.getByRole("progressbar", { name: "Output tokens", exact: true })).toHaveAttribute("aria-valuetext", new RegExp(` of ${(after.policy.output_tokens + after.additional_output_tokens).toLocaleString()}$`));
+    await expectCompactNumberField(page, "Additional input tokens");
     await expect(page.getByLabel("Additional input tokens")).toHaveValue("0");
     await expect(page.getByRole("button", { name: "Add allowance now", exact: true })).toBeDisabled();
   } finally {
@@ -123,8 +131,7 @@ test("loaded older retry actions follow successful work and server eligibility",
     await page.goto(controlURL);
     await page.getByLabel("Control token").fill(token);
     await page.getByRole("button", { name: "Unlock" }).click();
-    await page.getByRole("button", { name: "Config", exact: true }).click();
-    await page.getByRole("tab", { name: "Ontology", exact: true }).click();
+    await navigate(page, "Ontology maintenance");
     const row = page.locator("tr").filter({ has: page.locator(`td[title="${failed.id}"]`) });
     await expect(page.getByRole("button", { name: "Load older runs" })).toBeVisible();
     await expect(row).toHaveCount(0);

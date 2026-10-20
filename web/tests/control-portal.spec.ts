@@ -1,4 +1,8 @@
+import AxeBuilder from "@axe-core/playwright";
+import { navigate, openNavigation, confirmAction, expectPageContained } from "../tests-support/portal";
+import { checkControlLayout } from "../tests-support/control-layout";
 import { expect, type Locator, type Page, test } from "@playwright/test";
+import type { OntologyMaintenanceConfig, OntologyMaintenanceStatus } from "../src/api";
 
 const team = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -295,11 +299,23 @@ const dream = {
 
 type TestProfile = typeof team;
 
+for (const width of [1440, 900, 390]) for (const theme of ["light", "dark"] as const) {
+  test(`redesign control ${width}px ${theme}: accessible navigation, forms and history`, async ({ page }, testInfo) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await page.setViewportSize({ width, height: 1000 });
+    await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
+    await mockApi(page, { teams: [team], keys: [key] });
+    await checkControlLayout(page, testInfo, width, theme);
+    expect(pageErrors).toEqual([]);
+  });
+}
+
 test("team creation flow", async ({ page }) => {
   await mockApi(page, { teams: [team], keys: [] });
   await openPortal(page);
 
-  await page.getByRole("button", { name: "New Team" }).click();
+  await page.getByRole("button", { name: "New team" }).click();
   await page.getByLabel("Name").first().fill("Work Team");
   await page.getByLabel("Description").first().fill("for work");
   await page.getByRole("button", { name: /^Create$/ }).click();
@@ -311,7 +327,7 @@ test("API key creation shows plaintext once", async ({ page }) => {
   await mockApi(page, { teams: [team], keys: [] });
   await openPortal(page);
 
-  await page.getByRole("button", { name: /Team Credentials/ }).click();
+  await navigate(page, "Credentials");
   await page.getByLabel("Role").selectOption("member");
   await page.getByLabel("Write").uncheck();
   await page.getByRole("button", { name: "Create credential" }).click();
@@ -322,36 +338,47 @@ test("API key creation shows plaintext once", async ({ page }) => {
 });
 
 test("team and credential names update and credential key regenerates", async ({ page }) => {
-  await mockApi(page, { teams: [team], keys: [key] });
+  const other = { ...key, id: "55555555-5555-4555-8555-555555555555", name: "Other credential", role: "member" as const };
+  await mockApi(page, { teams: [team], keys: [key, other] });
   await openPortal(page);
 
-  await page.getByRole("button", { name: /Team Settings/ }).click();
+  await navigate(page, "Team settings");
   await page.locator("#team-name").fill("Renamed Team");
   await page.getByRole("button", { name: /^Save$/ }).click();
   await expect(page.getByRole("heading", { name: "Renamed Team" })).toBeVisible();
 
-  await page.getByRole("button", { name: /Team Credentials/ }).click();
+  await navigate(page, "Credentials");
   await page.getByLabel("Credential name default credential").fill("Research credential");
   await page.getByRole("button", { name: /Save credential default credential/ }).click();
   await expect(page.getByLabel("Credential name Research credential")).toHaveValue("Research credential");
 
-  page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: /Regenerate API key for credential Research credential/ }).click();
+  await confirmAction(page, "Regenerate API key");
   await expect(page.getByLabel("Generated API key")).toHaveValue("dm_rotated_once");
+  const unfinished = page.getByLabel("Credential name Research credential", { exact: true });
+  await unfinished.fill("Unfinished rename");
+  await page.getByRole("button", { name: "Regenerate API key for credential Other credential", exact: true }).click();
+  await confirmAction(page, "Cancel");
+  await expect(unfinished).toHaveValue("Unfinished rename");
+  const reloaded = page.waitForResponse((response) => response.request().method() === "GET" && new URL(response.url()).pathname === `/control/api/teams/${team.id}/credentials`);
+  await page.getByRole("button", { name: "Regenerate API key for credential Other credential", exact: true }).click();
+  await confirmAction(page, "Regenerate API key");
+  await reloaded;
+  await expect(unfinished).toHaveValue("Unfinished rename");
 });
 
 test("team credential list and delete flow", async ({ page }) => {
   await mockApi(page, { teams: [team], keys: [key] });
   await openPortal(page);
 
-  await page.getByRole("button", { name: /Team Credentials/ }).click();
+  await navigate(page, "Credentials");
   await expect(page.getByText("******abc123")).toBeVisible();
   const keyRow = page.getByRole("row", { name: /abc123/ });
   await expect(keyRow.getByLabel("Read")).toBeChecked();
   await expect(keyRow.getByLabel("Write")).toBeChecked();
   await expect(keyRow.getByText(/May/)).toBeVisible();
-  page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: /Delete credential default credential/ }).click();
+  await confirmAction(page, "Delete");
 
   await expect(page.getByRole("button", { name: /Delete credential default credential/ })).toBeHidden();
   await expect(page.getByText("******abc123")).toBeHidden();
@@ -361,12 +388,12 @@ test("IP ban list and clear reset flow", async ({ page }) => {
   await mockApi(page, { teams: [team], keys: [key], bans: [ban] });
   await openPortal(page);
 
-  await page.getByRole("button", { name: /IP Bans/ }).click();
+  await navigate(page, "IP bans");
   await expect(page.getByText("203.0.113.10")).toBeVisible();
   await expect(page.getByRole("row", { name: /203.0.113.10/ })).toContainText("11");
 
-  page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: /Clear IP ban and reset strikes for 203.0.113.10/ }).click();
+  await confirmAction(page, "Clear IP ban");
 
   await expect(page.getByText("203.0.113.10")).toBeHidden();
 });
@@ -374,6 +401,7 @@ test("IP ban list and clear reset flow", async ({ page }) => {
 test("team overview keeps request metrics after the Metrics tab is retired", async ({ page }) => {
   const calls = await mockApi(page, { teams: [team], keys: [key] });
   await openPortal(page);
+  await navigate(page, "Overview");
 
   await expect(page.getByRole("button", { name: /^Metrics$/ })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Open Metrics" })).toHaveCount(0);
@@ -388,7 +416,7 @@ test("logs tab renders structured details and raw output", async ({ page }) => {
   const calls = await mockApi(page, { teams: [team], keys: [key] });
   await openPortal(page);
 
-  await page.getByRole("button", { name: /^Logs$/ }).click();
+  await navigate(page, "Logs");
   await expect(page.locator(".resource-rail")).toHaveCount(0);
 
   await expect(page.getByText("GET /control/api/logs status 200")).toBeVisible();
@@ -399,6 +427,7 @@ test("logs tab renders structured details and raw output", async ({ page }) => {
   await expect(page.getByLabel(/Raw log body GET \/control\/api\/logs status 200/)).toContainText('"msg": "control_http_request"');
   await expectNoShellOverlap(page);
 
+  if (await page.locator(".contextual-sheet").isVisible()) await page.keyboard.press("Escape");
   await page.getByLabel("Rows").selectOption("25");
   await expect.poll(() => calls.logUrls.some((url) => url.includes("limit=25"))).toBe(true);
 });
@@ -407,7 +436,7 @@ test("recall feedback tab renders query, params, result ids, and resolved state"
   const calls = await mockApi(page, { teams: [team], keys: [key] });
   await openPortal(page);
 
-  await page.getByRole("button", { name: /^Feedback$/ }).click();
+  await navigate(page, "Recall feedback");
 
   await expect(page.getByText("Why was recall bad?")).toBeVisible();
   await expect(page.getByText("Pending recall waiting")).toHaveCount(0);
@@ -426,23 +455,36 @@ test("recall feedback tab renders query, params, result ids, and resolved state"
   await expect(page.getByLabel(/Raw recall feedback rec_1234567890/)).toContainText('"feedback_comment"');
   await expectNoShellOverlap(page);
 
+  if (await page.locator(".contextual-sheet").isVisible()) await page.keyboard.press("Escape");
   await page.getByLabel("Quality").selectOption("low");
   await expect.poll(() => calls.recallFeedbackUrls.some((url) => url.includes("quality=low"))).toBe(true);
 });
 
-test("dream outputs keep rationale behind info tooltip", async ({ page }) => {
+test("dream outputs keep rationale behind info tooltip", async ({ page }, testInfo) => {
   await mockApi(page, { teams: [team], keys: [key] });
   await openPortal(page);
 
-  await page.getByRole("button", { name: /Team Dream history/ }).click();
-  await expect(page.locator(".resource-rail")).toBeVisible();
+  await navigate(page, "Dream history");
+  await expect(page.locator(".resource-rail")).toHaveCount(0);
 
   await expect(page.getByLabel("Dream history status")).toContainText("Retired");
   await expect(page.getByText("A may affect B.")).toBeVisible();
   await expectNoShellOverlap(page);
   const rationale = page.locator(".info-tooltip-content", { hasText: dreamRationale });
+  const trigger = page.getByRole("button", { name: /Why this hypothesis: A may affect B\./ });
   await expect(rationale).toBeHidden();
-  await page.getByRole("button", { name: /Why this hypothesis: A may affect B\./ }).hover();
+  if (testInfo.project.name === "mobile") await trigger.tap();
+  else await trigger.click();
+  await expect(rationale).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(rationale).toBeHidden();
+  await page.keyboard.press("Tab");
+  await trigger.focus();
+  await expect(rationale).toBeVisible();
+  await page.keyboard.press("Tab");
+  await page.mouse.move(0, 0);
+  await expect(rationale).toBeHidden();
+  await trigger.hover();
   await expect(rationale).toBeVisible();
 });
 
@@ -451,9 +493,8 @@ test("team workspace header stays compact across team tabs", async ({ page }) =>
   await openPortal(page);
 
   const heights: number[] = [];
-  const workspaceTabs = page.locator(".team-workspace-tabs");
-  for (const tab of ["Overview", "Credentials", "Dream history", "Settings"]) {
-    await workspaceTabs.getByRole("button", { name: `Team ${tab}` }).click();
+  for (const tab of ["Overview", "Credentials", "Dream history", "Team settings"]) {
+    await navigate(page, tab);
     const box = await page.locator(".team-workspace-header").boundingBox();
     expect(box, `${tab} header was not rendered`).not.toBeNull();
     heights.push(box?.height ?? 0);
@@ -466,6 +507,7 @@ test("team workspace header stays compact across team tabs", async ({ page }) =>
 test("top signals keeps long dependency diagnostics inside its metric row", async ({ page }) => {
   await mockApi(page, { teams: [team], keys: [key] });
   await openPortal(page);
+  await navigate(page, "Overview");
 
   const topSignals = page.getByLabel("Top signals");
   const dependencyRow = topSignals.locator(".metric-row", { hasText: "Dependency checks" });
@@ -480,16 +522,16 @@ test("config tab uses horizontal subnavigation", async ({ page }) => {
   await mockApi(page, { teams: [team], keys: [key] });
   await openPortal(page);
 
-  await page.getByRole("button", { name: /^Config$/ }).click();
+  await navigate(page, "Settings");
 
-  const tabs = page.getByRole("tablist", { name: "Config sections" });
+  const tabs = page.getByRole("tablist", { name: "Settings sections" });
   await expect(tabs).toBeVisible();
   const tabsBox = await tabs.boundingBox();
   expect(tabsBox, "config tabs were not rendered").not.toBeNull();
   const maxTabsHeight = (page.viewportSize()?.width ?? 0) <= 620 ? 82 : 42;
   expect(tabsBox?.height ?? 0).toBeLessThanOrEqual(maxTabsHeight);
   await expect.poll(() => tabs.evaluate((element) => element.closest(".surface") === null)).toBe(true);
-  await tabs.getByRole("tab", { name: /^Logs$/ }).click();
+  await tabs.getByRole("tab", { name: /^Operation logs$/ }).click();
   await expect(page.getByRole("heading", { name: "Operation Logs" })).toBeVisible();
   await expectNoShellOverlap(page);
 });
@@ -498,8 +540,8 @@ test("recall feedback retention config saves from control portal", async ({ page
   const calls = await mockApi(page, { teams: [team], keys: [key] });
   await openPortal(page);
 
-  await page.getByRole("button", { name: /^Config$/ }).click();
-  await page.getByRole("tab", { name: /^Recall$/ }).click();
+  await navigate(page, "Settings");
+  await page.getByRole("tab", { name: /^Recall feedback$/ }).click();
 
   await expect(page.getByLabel("Investigation retention days")).toHaveValue("30");
   await page.getByLabel("Investigation retention days").fill("45");
@@ -514,11 +556,11 @@ test("team delete flow", async ({ page }) => {
   await mockApi(page, { teams: [team], keys: [key] });
   await openPortal(page);
 
-  await page.getByRole("button", { name: /Team Settings/ }).click();
-  page.once("dialog", (dialog) => dialog.accept());
+  await navigate(page, "Team settings");
   await page.getByRole("button", { name: /^Delete$/ }).click();
+  await confirmAction(page, "Delete team");
 
-  await expect(page.getByLabel("Control details").getByText("No teams")).toBeVisible();
+  await expect(page.getByLabel("Control details").getByRole("heading", { name: "Create your first team" })).toBeVisible();
 });
 
 test("auth token failure", async ({ page }) => {
@@ -533,25 +575,57 @@ test("auth token failure", async ({ page }) => {
   await expect(page.getByRole("alert")).toContainText("invalid token");
 });
 
+for (const colorScheme of ["light", "dark"] as const) {
+  test(`workspace errors remain accessible inside mobile navigation in ${colorScheme}`, async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.emulateMedia({ colorScheme });
+    await mockApi(page, { teams: [team], keys: [key] });
+    await openPortal(page);
+    let finishRequest!: () => void;
+    const pending = new Promise<void>((resolve) => { finishRequest = resolve; });
+    await page.route(/\/control\/api\/teams(?:\?|$)/, async (route) => {
+      await pending;
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "Team directory unavailable" }) });
+    });
+    await page.getByRole("button", { name: "Refresh teams", exact: true }).click();
+    const navigation = page.getByRole("dialog", { name: "Control navigation" });
+    try {
+      await openNavigation(page);
+      await expect(navigation).toBeVisible();
+    } finally {
+      finishRequest();
+    }
+    await expect(navigation.getByRole("alert")).toHaveText("Team directory unavailable");
+    await expect(page.getByRole("alert")).toHaveCount(1);
+    expect((await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze()).violations).toEqual([]);
+    await expectPageContained(page);
+    await page.keyboard.press("Escape");
+    await expect(navigation).toBeHidden();
+    await expect(page.getByRole("alert")).toHaveText("Team directory unavailable");
+  });
+}
+
 test("responsive portal layout", async ({ page }) => {
   await mockApi(page, { teams: [team], keys: [key] });
   await openPortal(page);
 
-  await expect(page.getByRole("heading", { name: "Dense-Mem Control" })).toBeVisible();
+  await expect(page.getByLabel("Current workspace")).toContainText(team.name);
   await expect(page.getByRole("heading", { name: "Teams" })).toBeVisible();
   const shellMinHeight = await page.locator(".app-shell").evaluate((element) => Number.parseFloat(getComputedStyle(element).minHeight));
   expect(shellMinHeight).toBeGreaterThanOrEqual((page.viewportSize()?.height ?? 0) - 1);
   await expect(page.locator(".topbar")).toHaveCSS("border-bottom-width", "1px");
-  await expect(page.locator(".primary-rail")).toHaveCSS("border-right-width", "1px");
-  await expect(page.locator(".resource-rail")).toHaveCSS("border-right-width", "1px");
-  await expect(page.locator(".surface").first()).toHaveCSS("border-radius", "8px");
-  await page.getByRole("button", { name: /Team Credentials/ }).click();
+  if ((page.viewportSize()?.width ?? 0) >= 768) {
+    await expect(page.locator(".primary-rail")).toBeVisible();
+    await expect(page.locator(".primary-rail")).toHaveCSS("border-right-width", "1px");
+  } else {
+    await expect(page.getByRole("button", { name: "Open navigation" })).toBeVisible();
+  }
+  await expect(page.locator(".resource-rail")).toHaveCount(0);
+  await navigate(page, "Credentials");
   await expect(page.getByRole("heading", { name: "Credentials" })).toBeVisible();
   await expectNoShellOverlap(page);
 
-  if ((page.viewportSize()?.width ?? 1000) < 700) {
-    await expect(page.locator(".workspace")).toHaveCSS("grid-template-columns", /[0-9.]+px/);
-  }
+  await expectPageContained(page);
 });
 
 async function openPortal(page: Page) {
@@ -578,15 +652,13 @@ async function expectNoShellOverlap(page: Page) {
     })),
   }));
   expect(overflow.documentWidth).toBeLessThanOrEqual(overflow.viewportWidth + 1);
-  for (const tableWrap of overflow.tableWraps) {
-    expect(tableWrap.scrollWidth, `${tableWrap.className} overflowed horizontally`).toBeLessThanOrEqual(tableWrap.clientWidth + 1);
-  }
+  await expectPageContained(page);
   for (const navContainer of overflow.navContainers) {
     expect(navContainer.scrollWidth, `${navContainer.className} overflowed horizontally`).toBeLessThanOrEqual(navContainer.clientWidth + 1);
   }
 
   const boxes = await page.locator(".topbar, .primary-rail, .resource-rail, .detail-pane").evaluateAll((elements) => (
-    elements.map((element) => {
+    elements.filter((element) => element.getBoundingClientRect().width > 0).map((element) => {
       const rect = element.getBoundingClientRect();
       return {
         className: element.className,
@@ -661,6 +733,16 @@ async function mockApi(page: Page, state: { teams: TestProfile[]; keys: TestKey[
   let teams = [...state.teams];
   let keys = [...state.keys];
   let bans = [...(state.bans ?? [])];
+  const ontologyPolicy = { enabled: true, cadence_hours: 12 as const, start_time_local: "03:00", timezone: "UTC", model: "maintenance-model", max_concurrency: 1, input_tokens: 250000, output_tokens: 100000, settings_version: "1" };
+  let ontologyConfig: OntologyMaintenanceConfig = {
+    update_time: "2026-10-18T12:00:00Z", effective: ontologyPolicy,
+    items: Object.entries({ ONTOLOGY_MAINTENANCE_ENABLED: "true", ONTOLOGY_MAINTENANCE_CADENCE_HOURS: "12", ONTOLOGY_MAINTENANCE_START_TIME_LOCAL: "03:00", ONTOLOGY_MAINTENANCE_MODEL: "maintenance-model", ONTOLOGY_MAINTENANCE_MAX_CONCURRENCY: "1", ONTOLOGY_MAINTENANCE_INPUT_TOKENS: "250000", ONTOLOGY_MAINTENANCE_OUTPUT_TOKENS: "100000" }).map(([key, value]) => ({ key, value, effective_value: value, updated_at: "2026-10-18T12:00:00Z" })),
+  };
+  const ontologyStatus: OntologyMaintenanceStatus = {
+    observed_at: "2026-10-18T12:00:00Z", enabled: true, paused: false, discovery_complete: false, coverage_complete: false,
+    counts: { eligible: 1024, organized: 842, pending: 112, failed: 8, ambiguous: 18, budget_deferred: 44 }, pending_policy: ontologyPolicy,
+    window: { id: "window-a", starts_at: "2026-10-18T03:00:00Z", ends_at: "2026-10-18T15:00:00Z", policy: ontologyPolicy, charged_input_tokens: 160000, charged_output_tokens: 38000, reported_input_tokens: 144000, reported_output_tokens: 34000, reserved_input_tokens: 16000, reserved_output_tokens: 4000, additional_input_tokens: 1000, additional_output_tokens: 0, overrun: false },
+  };
   let recallFeedbackConfig = {
     update_time: "2026-06-16T12:00:00Z",
     items: [
@@ -672,6 +754,19 @@ async function mockApi(page: Page, state: { teams: TestProfile[]; keys: TestKey[
   await page.route("**/control/api/**", async (route) => {
     const url = route.request().url();
     const method = route.request().method();
+
+    if (url.includes("/evidence-conflicts?")) return route.fulfill({ json: { data: { items: [1, 2, 3].map((index) => ({ team_id: team.id, conflict_id: `${index}1111111-1111-4111-8111-111111111111`, space_id: "shared-space", space_generation: 1, kind: "evidence_conflict", status: "open", version: 1, created_at: "2026-10-18T12:00:00Z", updated_at: "2026-10-18T12:00:00Z", positions: [{ position_id: `position-${index}`, evidence_id: `evidence-${index}`, occurrence_id: `occurrence-${index}`, quote: "A bounded cited position", span_start: 0, span_end: 23, authority: "primary", submitted: true, created_at: "2026-10-18T12:00:00Z" }] })), next_cursor: null } } });
+    if (url.includes("/conflicts/queue")) return route.fulfill({ json: { data: { items: [], next_cursor: null, summary: { open_count: 0, overdue_count: 0, active_lease_count: 0, expired_lease_count: 0, failed_assessment_count_24h: 0, lww_resolution_count_24h: 0, pending_derived_task_count: 0, failed_derived_task_count: 0, oldest_open_age_seconds: 0, oldest_overdue_age_seconds: 0, collected_at: "2026-10-18T12:00:00Z" } } } });
+
+    if (url.includes("/config/ontology-maintenance")) {
+      if (method === "PATCH") {
+        const values = route.request().postDataJSON().items as Array<{ key: string; value: string }>;
+        ontologyConfig = { ...ontologyConfig, items: ontologyConfig.items.map((item) => ({ ...item, value: values.find((value) => value.key === item.key)!.value })) };
+      }
+      return route.fulfill({ json: { data: ontologyConfig } });
+    }
+    if (url.endsWith("/ontology/status")) return route.fulfill({ json: { data: ontologyStatus } });
+    if (url.includes("/ontology/runs?")) return route.fulfill({ json: { data: { runs: [] } } });
 
     if (url.endsWith("/session")) {
       const authorization = route.request().headers().authorization ?? "";
