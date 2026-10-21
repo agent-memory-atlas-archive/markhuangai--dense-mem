@@ -725,7 +725,8 @@ test("staging deployment is owner-gated and manual-only", async () => {
   assert.match(authorize, /refs\/pull\/\$\{preview\[1\]\}\/head/);
   assert.match(authorize, /core\.setOutput\("revision", revision\)/);
   assert.match(authorize, /core\.setOutput\("tag", tag\)/);
-  assert.doesNotMatch(workflow, /actions\/checkout|image-release-policy/);
+  assert.match(deploy, /actions\/checkout@v7/);
+  assert.doesNotMatch(workflow, /image-release-policy/);
   assert.match(rehearsal, /^    needs: authorize$/m);
   assert.match(
     rehearsal,
@@ -744,37 +745,58 @@ test("staging deployment is owner-gated and manual-only", async () => {
   assert.match(deploy, /^    environment: staging$/m);
 });
 
-test("staging deployment rehearses before an always-pull healthy startup", async () => {
-  const workflow = await readFile(
-    new URL("../../.github/workflows/deploy-stage.yml", import.meta.url),
-    "utf8",
-  );
+test("staging deployment shares source verification and pinned healthy startup", async () => {
+  const [workflow, helper] = await Promise.all([
+    readFile(new URL("../../.github/workflows/deploy-stage.yml", import.meta.url), "utf8"),
+    readFile(new URL("../../.github/scripts/deploy-staging-image.sh", import.meta.url), "utf8"),
+  ]);
   const rehearsal = workflowJob(workflow, "staging-migration-rehearsal");
   const deploy = workflowJob(workflow, "deploy-staging");
-
   assert.match(workflow, /^  packages: read$/m);
   assert.doesNotMatch(workflow, /^  (?:actions|pull-requests|statuses): read$/m);
   assert.match(rehearsal, /^    needs: authorize$/m);
   assert.match(deploy, /needs\.staging-migration-rehearsal\.result == 'success'/);
   assert.doesNotMatch(workflow, /sync_script|sync\.sh|go test/);
-  assert.match(deploy, /migration-rehearsal\.lock/);
-  assert.match(deploy, /flock --wait 600 9/);
-  assert.match(
-    deploy,
-    /IMAGE_TAG: \$\{\{ needs\.authorize\.outputs\.tag \}\}/,
-  );
-  assert.match(
-    deploy,
-    /DENSE_MEM_IMAGE="\$\{IMAGE_TAG\}"[\s\\]*docker compose up -d/,
-  );
-  assert.doesNotMatch(deploy, /DENSE_MEM_IMAGE="ghcr\.io\/markhuangai\/dense-mem:/);
-  assert.doesNotMatch(deploy, /DENSE_MEM_IMAGE_TAG/);
-  assert.match(deploy, /docker compose up -d[\s\\]*--pull always/);
-  assert.match(deploy, /--pull always[\s\\]*--no-deps/);
-  assert.match(deploy, /--wait[\s\\]*--wait-timeout 3000/);
-  assert.doesNotMatch(deploy, /EXPECTED_REVISION|org\.opencontainers\.image\.revision/);
-  assert.doesNotMatch(deploy, /docker (?:image )?pull|docker compose pull|--pull never/);
-  assert.doesNotMatch(deploy, /docker compose logs/);
+  assert.match(deploy, /EXPECTED_REVISION: \$\{\{ needs\.staging-migration-rehearsal\.outputs\.revision \}\}/);
+  assert.match(deploy, /deploy-staging-image\.sh/);
+  assert.match(helper, /migration-rehearsal\.lock/);
+  assert.match(helper, /flock --wait 600 9/);
+  assert.match(helper, /org\.opencontainers\.image\.revision/);
+  assert.match(helper, /org\.opencontainers\.image\.variant/);
+  assert.match(helper, /docker pull "\$image"/);
+  assert.match(helper, /export DENSE_MEM_IMAGE="\$\{image_tag\}@\$\{image_digest\}"/);
+  assert.match(helper, /docker compose up -d --pull always --no-deps --wait --wait-timeout 3000 server/);
+  assert.doesNotMatch(helper, /docker compose logs/);
+});
+
+test("staging deployment job budgets leave time for image transfer and failure cleanup", async () => {
+  const helper = await readFile(new URL("../../.github/scripts/deploy-staging-image.sh", import.meta.url), "utf8");
+  const lockWait = Number(helper.match(/flock --wait (\d+) 9/)[1]);
+  const startupWait = Number(helper.match(/--wait-timeout (\d+) server/)[1]);
+  const cleanupWait = Number(helper.match(/docker compose stop --timeout (\d+) server/)[1]);
+  const cleanupDeadline = helper.match(/timeout --signal=TERM --kill-after=(\d+)s (\d+)s docker compose stop --timeout \d+ server/);
+  assert.ok(cleanupDeadline, "cleanup must have its own bounded process group");
+  const cleanupGraceSeconds = Number(cleanupDeadline[1]);
+  const cleanupSeconds = Number(cleanupDeadline[2]);
+  assert.ok(cleanupSeconds > cleanupWait, "cleanup must retain the configured container stop wait");
+  for (const [file, job] of [["deploy-stage", "deploy-staging"], ["release-rc", "recover-staging"]]) {
+    const workflow = await readFile(new URL(`../../.github/workflows/${file}.yml`, import.meta.url), "utf8");
+    const source = workflowJob(workflow, job);
+    const deadline = source.match(/timeout --signal=TERM --kill-after=(\d+)s --verbose (\d+)m bash -euo pipefail <<'DEPLOY'/);
+    assert.ok(deadline, `${job} must bound the entire login and deployment operation`);
+    const graceSeconds = Number(deadline[1]);
+    const operationSeconds = Number(deadline[2]) * 60;
+    const checkout = source.split("      - name: Checkout trusted staging deployment helper\n")[1].split("\n      - name:")[0];
+    const checkoutSeconds = Number(checkout.match(/^        timeout-minutes: (\d+)$/m)[1]) * 60;
+    const jobSeconds = Number(source.match(/^    timeout-minutes: (\d+)$/m)[1]) * 60;
+    assert.ok(operationSeconds > lockWait + startupWait, `${job} must retain its configured lock and startup waits`);
+    assert.ok(graceSeconds > cleanupSeconds + cleanupGraceSeconds, `${job} must allow bounded candidate cleanup before forced termination`);
+    assert.ok(jobSeconds > checkoutSeconds + operationSeconds + graceSeconds, `${job} must reserve time outside the bounded deployment operation`);
+    assert.ok(source.indexOf(deadline[0]) < source.indexOf("docker login"));
+    assert.ok(source.indexOf("docker login") < source.indexOf("exec .github/scripts/deploy-staging-image.sh"));
+    const script = source.split("        run: |\n").at(-1).split("\n").map((line) => line.slice(10)).join("\n");
+    await execFileAsync("bash", ["-n", "-c", script]);
+  }
 });
 
 test("owner-admin PR pushes run automatically without an approval label", () => {

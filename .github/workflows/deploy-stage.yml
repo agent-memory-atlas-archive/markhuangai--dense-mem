@@ -15,8 +15,9 @@ permissions:
   packages: read
 
 concurrency:
-  group: dense-mem-staging-deployment
+  group: release-version-tags
   cancel-in-progress: false
+  queue: max
 
 jobs:
   authorize:
@@ -46,6 +47,9 @@ jobs:
             if (process.env.DISPATCH_REF !== "refs/heads/main") {
               throw new Error("Staging deployments must be dispatched from main.");
             }
+            if (!/^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$/.test(tag)) {
+              throw new Error("A valid image tag is required.");
+            }
 
             const preview = /^test-([1-9][0-9]*)$/.exec(tag);
             const revision = preview ? `refs/pull/${preview[1]}/head` : tag;
@@ -72,25 +76,28 @@ jobs:
       contents: read
       packages: read
     runs-on: [home-server, bash, non-root]
-    timeout-minutes: 60
+    timeout-minutes: 75
     environment: staging
 
     steps:
+      - name: Checkout trusted staging deployment helper
+        uses: actions/checkout@v7
+        timeout-minutes: 2
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
       - name: Pull and deploy requested image
         shell: bash
         env:
           GHCR_TOKEN: ${{ github.token }}
           IMAGE_TAG: ${{ needs.authorize.outputs.tag }}
+          EXPECTED_REVISION: ${{ needs.staging-migration-rehearsal.outputs.revision }}
         run: |
           set -euo pipefail
 
-          stage_dir="${HOME}/dense-mem-stage"
-          if [[ ! -d "${stage_dir}" ]]; then
-            echo "::error::The staging directory is missing"
-            exit 1
-          fi
-          cd "${stage_dir}"
-
+          timeout --signal=TERM --kill-after=60s --verbose 70m bash -euo pipefail <<'DEPLOY'
           docker_config="${RUNNER_TEMP}/dense-mem-staging-docker"
           mkdir -p "${docker_config}"
           export DOCKER_CONFIG="${docker_config}"
@@ -98,22 +105,28 @@ jobs:
             docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
           unset GHCR_TOKEN
 
-          exec 9>"${HOME}/dense-mem-stage/migration-rehearsal.lock"
-          if ! flock --wait 600 9; then
-            echo "::error::Timed out waiting for the staging migration lock"
+          exec .github/scripts/deploy-staging-image.sh \
+            "${HOME}/dense-mem-stage" "${IMAGE_TAG}" "${EXPECTED_REVISION}"
+          DEPLOY
+
+  deployment-result:
+    name: Report staging deployment outcome
+    needs: [authorize, staging-migration-rehearsal, deploy-staging]
+    if: always() && !cancelled() && needs.authorize.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require healthy compatible recovery
+        env:
+          DEPLOY_RESULT: ${{ needs.deploy-staging.result }}
+          REHEARSAL_RESULT: ${{ needs.staging-migration-rehearsal.result }}
+        run: |
+          if [[ "${DEPLOY_RESULT}" != success ]]; then
+            {
+              echo '## Staging recovery incomplete'
+              echo "- Rehearsal: ${REHEARSAL_RESULT}"
+              echo "- Deployment: ${DEPLOY_RESULT}"
+              echo 'No fallback image was restarted. Inspect staging and dispatch Deploy staging from main with a compatible image tag.'
+            } >> "${GITHUB_STEP_SUMMARY}"
+            echo '::error::Staging recovery did not complete; inspect the failed rehearsal or deployment.'
             exit 1
           fi
-
-          DENSE_MEM_IMAGE="${IMAGE_TAG}" \
-            docker compose up -d \
-            --pull always \
-            --no-deps \
-            --wait \
-            --wait-timeout 3000 \
-            server
-
-          {
-            echo "## Staging deployment"
-            echo
-            echo "- Tag: \`${IMAGE_TAG}\`"
-          } >> "${GITHUB_STEP_SUMMARY}"
